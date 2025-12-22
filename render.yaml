@@ -67,4 +67,5 @@ services:
 
 databases:
   - name: alati-db
-    plan: starter
+    plan: basic-256mb
+    diskSizeGB: 15
