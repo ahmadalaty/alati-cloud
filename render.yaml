@@ -3,9 +3,9 @@ services:
     name: alati-api
     env: docker
     rootDir: backend
+    dockerfilePath: Dockerfile
     plan: starter
     autoDeploy: true
-    dockerfilePath: Dockerfile
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -31,9 +31,9 @@ services:
     name: alati-worker
     env: docker
     rootDir: worker
+    dockerfilePath: Dockerfile
     plan: starter
     autoDeploy: true
-    dockerfilePath: Dockerfile
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -58,11 +58,10 @@ services:
       - key: TRIAGE_THRESHOLD
         value: "0.6"
 
-databases:
-  - name: alati-db
-    plan: starter
-
-services:
   - type: redis
     name: alati-redis
+    plan: starter
+
+databases:
+  - name: alati-db
     plan: starter
