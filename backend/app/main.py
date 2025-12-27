@@ -5,9 +5,8 @@ from .db import Base, engine, get_db, SessionLocal
 from .models import User, Scan, ScanStatus
 from .schemas import LoginRequest, TokenResponse, ScanCreateRequest, ScanResponse
 from .auth import hash_password, verify_password, create_token, require_user
-from .storage import new_upload_id, save_upload
+from .storage import new_upload_id, save_upload, upload_target_path
 from .tasks import process_scan
-from .config import settings
 import os
 
 app = FastAPI(title="Alati Cloud API")
@@ -42,10 +41,8 @@ def _upsert_user(db: Session, email: str, password: str, make_admin: bool = Fals
 def seed():
     db = SessionLocal()
     try:
-        # Default MVP admin (keep for now)
         _upsert_user(db, "admin@alati.ai", "admin123", make_admin=True)
 
-        # Owner account from Render Environment Variables
         owner_email = os.getenv("OWNER_EMAIL", "").strip()
         owner_password = os.getenv("OWNER_PASSWORD", "").strip()
         if owner_email and owner_password:
@@ -61,7 +58,6 @@ def health():
 
 @app.get("/", response_class=HTMLResponse)
 def presentation_ui():
-    # Simple, investor-friendly UI served directly from the API.
     return """
 <!doctype html>
 <html>
@@ -184,7 +180,6 @@ async function doAnalyze() {
   setStatus(rs, "Uploading image…");
 
   try {
-    // 1) Upload
     const form = new FormData();
     form.append("file", fileInput.files[0]);
 
@@ -193,10 +188,11 @@ async function doAnalyze() {
       headers: { "Authorization": "Bearer " + TOKEN },
       body: form
     });
-    const upData = await up.json();
+    const upText = await up.text();
+    let upData;
+    try { upData = JSON.parse(upText); } catch(e) { throw new Error(upText); }
     if (!up.ok) throw new Error(upData.detail || "Upload failed");
 
-    // 2) Create scan
     setStatus(rs, "Creating scan…");
     const sc = await fetch("/scan/create", {
       method: "POST",
@@ -206,10 +202,11 @@ async function doAnalyze() {
       },
       body: JSON.stringify({ upload_id: upData.upload_id, eye })
     });
-    const scData = await sc.json();
+    const scText = await sc.text();
+    let scData;
+    try { scData = JSON.parse(scText); } catch(e) { throw new Error(scText); }
     if (!sc.ok) throw new Error(scData.detail || "Scan create failed");
 
-    // 3) Poll scan until done
     const scanId = scData.id;
     setStatus(rs, "Analyzing… (cloud AI running)");
 
@@ -218,13 +215,14 @@ async function doAnalyze() {
       const g = await fetch(`/scan/${scanId}`, {
         headers: { "Authorization": "Bearer " + TOKEN }
       });
-      const gData = await g.json();
+      const gText = await g.text();
+      let gData;
+      try { gData = JSON.parse(gText); } catch(e) { throw new Error(gText); }
       if (!g.ok) throw new Error(gData.detail || "Scan get failed");
 
       if (gData.status === "done") {
         setStatus(rs, "Done ✅", true);
         rb.textContent = JSON.stringify(gData.result, null, 2);
-
         if (gData.report_url) {
           rl.innerHTML = `Report: <a href="${gData.report_url}" target="_blank">Download PDF</a>`;
         }
@@ -273,7 +271,8 @@ def create_scan(
     db: Session = Depends(get_db),
     user_id: int = Depends(require_user),
 ):
-    image_path = os.path.join(settings.LOCAL_STORAGE_DIR, f"{body.upload_id}.jpg")
+    # IMPORTANT: use the same storage helper as upload, so Render /tmp works.
+    image_path = upload_target_path(body.upload_id)
     if not os.path.exists(image_path):
         raise HTTPException(400, "Upload not found")
 
@@ -307,11 +306,7 @@ def get_scan(
     if not scan or scan.user_id != user_id:
         raise HTTPException(404, "Not found")
 
-    report_url = (
-        f"/scan/{scan.id}/report"
-        if scan.report_path and scan.status == ScanStatus.done
-        else None
-    )
+    report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
 
     return {
         "id": scan.id,
