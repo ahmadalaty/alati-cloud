@@ -1,13 +1,13 @@
 import os
 import json
-from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Header, Query
+from fastapi.responses import HTMLResponse, FileResponse
 from sqlalchemy.orm import Session
 
 from .db import Base, engine, get_db, SessionLocal
 from .models import User, Scan, ScanStatus
 from .schemas import LoginRequest, TokenResponse, ScanCreateRequest, ScanResponse
-from .auth import hash_password, verify_password, create_token, require_user
+from .auth import hash_password, verify_password, create_token, require_user, decode_token
 from .storage import new_upload_id, save_upload, upload_target_path
 from .tasks import process_scan
 
@@ -16,19 +16,12 @@ Base.metadata.create_all(bind=engine)
 
 
 def make_json_safe(obj):
-    # None / primitives
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
-
-    # dict
     if isinstance(obj, dict):
         return {str(k): make_json_safe(v) for k, v in obj.items()}
-
-    # list/tuple/set
     if isinstance(obj, (list, tuple, set)):
         return [make_json_safe(x) for x in obj]
-
-    # numpy
     try:
         import numpy as np
         if isinstance(obj, (np.integer,)):
@@ -39,8 +32,6 @@ def make_json_safe(obj):
             return make_json_safe(obj.tolist())
     except Exception:
         pass
-
-    # torch
     try:
         import torch
         if isinstance(obj, torch.Tensor):
@@ -49,14 +40,13 @@ def make_json_safe(obj):
             return make_json_safe(obj.detach().cpu().tolist())
     except Exception:
         pass
-
     return str(obj)
 
 
 def decode_db_result(val):
     """
-    Our DB stores scan.result as TEXT (JSON string).
-    This converts it back into a dict for the API response.
+    DB stores scan.result as TEXT (JSON string).
+    Convert it back into dict for API/UI responses.
     """
     if val is None:
         return None
@@ -68,19 +58,6 @@ def decode_db_result(val):
         except Exception:
             return {"raw": val}
     return {"raw": str(val)}
-
-
-def normalize_eye_for_db(eye: str) -> str:
-    """
-    DB column scans.eye is VARCHAR(2).
-    Store as 'L' or 'R' to avoid 'value too long for type character varying(2)'.
-    """
-    e = (eye or "").strip().lower()
-    if e in ("left", "l"):
-        return "L"
-    if e in ("right", "r"):
-        return "R"
-    return "L"
 
 
 def _upsert_user(db: Session, email: str, password: str, make_admin: bool = False):
@@ -314,16 +291,17 @@ async function doAnalyze() {
 
     if (!sc.ok) throw new Error(scData.detail || "Scan failed");
 
-    if (scData.status === "done") {
-      setStatus(rs, "Done ✅", true);
-      rb.textContent = JSON.stringify(scData.result, null, 2);
-      if (scData.report_url) {
-        rl.innerHTML = `Report: <a href="${scData.report_url}" target="_blank">Download PDF</a>`;
-      }
-      return;
+    setStatus(rs, "Done ✅", true);
+    rb.textContent = JSON.stringify(scData.result, null, 2);
+
+    if (scData.report_url) {
+      // ✅ Browser-safe report download: include token in URL
+      const url = scData.report_url + "?token=" + encodeURIComponent(TOKEN);
+      rl.innerHTML = `Report: <a href="${url}" target="_blank">Download PDF</a>`;
+    } else {
+      rl.textContent = "No report available.";
     }
 
-    setStatus(rs, "Queued…", true);
   } catch (e) {
     setStatus(rs, "Error: " + e.message, false);
   }
@@ -355,13 +333,12 @@ def create_scan(body: ScanCreateRequest, db: Session = Depends(get_db), user_id:
     if not os.path.exists(image_path):
         raise HTTPException(400, "Upload not found")
 
-    eye_db = normalize_eye_for_db(body.eye)
-
-    scan = Scan(user_id=user_id, eye=eye_db, image_path=image_path, status=ScanStatus.queued)
+    scan = Scan(user_id=user_id, eye=body.eye, image_path=image_path, status=ScanStatus.queued)
     db.add(scan)
     db.commit()
     db.refresh(scan)
 
+    # DEMO_MODE: run sync in API for demos (no worker needed)
     if os.getenv("DEMO_MODE", "").strip() == "1":
         try:
             process_scan.run(scan.id)
@@ -372,12 +349,11 @@ def create_scan(body: ScanCreateRequest, db: Session = Depends(get_db), user_id:
 
         db.refresh(scan)
 
-        safe_result = decode_db_result(scan.result)
-        safe_result = make_json_safe(safe_result)
-
+        safe_result = make_json_safe(decode_db_result(scan.result))
         report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
         return {"id": scan.id, "status": scan.status.value, "result": safe_result, "report_url": report_url}
 
+    # Normal mode: async worker
     process_scan.delay(scan.id)
     return {"id": scan.id, "status": scan.status.value, "result": None, "report_url": None}
 
@@ -388,18 +364,40 @@ def get_scan(scan_id: int, db: Session = Depends(get_db), user_id: int = Depends
     if not scan or scan.user_id != user_id:
         raise HTTPException(404, "Not found")
 
-    safe_result = decode_db_result(scan.result)
-    safe_result = make_json_safe(safe_result)
-
+    safe_result = make_json_safe(decode_db_result(scan.result))
     report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
     return {"id": scan.id, "status": scan.status.value, "result": safe_result, "report_url": report_url}
 
 
 @app.get("/scan/{scan_id}/report")
-def get_report(scan_id: int, db: Session = Depends(get_db), user_id: int = Depends(require_user)):
+def get_report(
+    scan_id: int,
+    token: str = Query("", description="JWT token for browser downloads"),
+    authorization: str = Header(None),
+    db: Session = Depends(get_db),
+):
+    # 1) Try header auth (API usage)
+    user_id = None
+    if authorization and authorization.startswith("Bearer "):
+        try:
+            user_id = require_user(authorization)
+        except Exception:
+            user_id = None
+
+    # 2) Try token in URL (browser usage)
+    if user_id is None:
+        if not token:
+            raise HTTPException(401, "Missing token")
+        user_id = decode_token(token)
+        if user_id is None:
+            raise HTTPException(401, "Invalid token")
+
     scan = db.get(Scan, scan_id)
-    if not scan or scan.user_id != user_id or not scan.report_path:
+    if not scan or scan.user_id != int(user_id) or not scan.report_path:
         raise HTTPException(404, "Not found")
 
-    from fastapi.responses import FileResponse
-    return FileResponse(scan.report_path, media_type="application/pdf", filename=f"alati_report_{scan_id}.pdf")
+    return FileResponse(
+        scan.report_path,
+        media_type="application/pdf",
+        filename=f"alati_report_{scan_id}.pdf",
+    )
