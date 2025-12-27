@@ -10,6 +10,8 @@ from .tasks import process_scan
 import os
 
 app = FastAPI(title="Alati Cloud API")
+
+# Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
 
 
@@ -52,6 +54,46 @@ def seed():
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/debug")
+def debug_info():
+    """
+    SAFE debug endpoint: shows env flags and basic runtime checks.
+    DOES NOT return secrets.
+    """
+    demo_mode = os.getenv("DEMO_MODE", "").strip()
+    debug_errors = os.getenv("DEBUG_ERRORS", "").strip()
+
+    # Check torch import
+    torch_ok = True
+    torch_version = None
+    torch_error = None
+    try:
+        import torch  # noqa
+        torch_version = getattr(torch, "__version__", None)
+    except Exception as e:
+        torch_ok = False
+        torch_error = f"{type(e).__name__}: {str(e)}"
+
+    # Check model file presence (both API + worker usually have same paths in repo)
+    base_dir = os.path.dirname(__file__)
+    model_dir = os.path.join(base_dir, "model_files")
+    res18 = os.path.join(model_dir, "alati_dualeye_model_resnet18.pth")
+    res50 = os.path.join(model_dir, "alati_dualeye_model_resnet50.pth")
+    labels = os.path.join(model_dir, "labels.json")
+
+    return {
+        "demo_mode": demo_mode,
+        "debug_errors": debug_errors,
+        "torch_ok": torch_ok,
+        "torch_version": torch_version,
+        "torch_error": torch_error,
+        "model_dir": model_dir,
+        "resnet18_exists": os.path.exists(res18),
+        "resnet50_exists": os.path.exists(res50),
+        "labels_exists": os.path.exists(labels),
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -123,6 +165,7 @@ def presentation_ui():
       <p id="resultStatus" class="muted">Waiting…</p>
       <pre id="resultBox">—</pre>
       <p id="reportLink" class="muted"></p>
+      <p class="muted">Debug: <a href="/debug" target="_blank">/debug</a></p>
     </div>
 
     <p class="muted">API docs: <a href="/docs" target="_blank">/docs</a> • Health: <a href="/health" target="_blank">/health</a></p>
@@ -204,8 +247,13 @@ async function doAnalyze() {
     });
 
     const scText = await sc.text();
-    let scData;
-    try { scData = JSON.parse(scText); } catch(e) { throw new Error(scText); }
+
+    // Try parse JSON; if not JSON, show raw text (this is your current issue)
+    let scData = null;
+    try { scData = JSON.parse(scText); } catch(e) {
+      throw new Error(scText);
+    }
+
     if (!sc.ok) throw new Error(scData.detail || "Scan failed");
 
     if (scData.status === "done") {
@@ -266,7 +314,6 @@ def create_scan(
     db.commit()
     db.refresh(scan)
 
-    # DEMO MODE: run locally in API (no celery/worker dependency)
     if os.getenv("DEMO_MODE", "").strip() == "1":
         try:
             process_scan.run(scan.id)
@@ -277,12 +324,7 @@ def create_scan(
 
         db.refresh(scan)
         report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
-        return {
-            "id": scan.id,
-            "status": scan.status.value,
-            "result": scan.result,
-            "report_url": report_url,
-        }
+        return {"id": scan.id, "status": scan.status.value, "result": scan.result, "report_url": report_url}
 
     process_scan.delay(scan.id)
     return {"id": scan.id, "status": scan.status.value, "result": None, "report_url": None}
