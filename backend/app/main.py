@@ -1,18 +1,60 @@
+import os
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
+
 from .db import Base, engine, get_db, SessionLocal
 from .models import User, Scan, ScanStatus
 from .schemas import LoginRequest, TokenResponse, ScanCreateRequest, ScanResponse
 from .auth import hash_password, verify_password, create_token, require_user
 from .storage import new_upload_id, save_upload, upload_target_path
 from .tasks import process_scan
-import os
 
 app = FastAPI(title="Alati Cloud API")
-
-# Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
+
+
+def make_json_safe(obj):
+    """
+    Convert numpy / torch types into plain Python types so FastAPI can JSON-serialize them.
+    This is the #1 cause of 'Internal Server Error' after inference.
+    """
+    # None / primitives
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    # dict
+    if isinstance(obj, dict):
+        return {str(k): make_json_safe(v) for k, v in obj.items()}
+
+    # list/tuple/set
+    if isinstance(obj, (list, tuple, set)):
+        return [make_json_safe(x) for x in obj]
+
+    # numpy scalars / arrays
+    try:
+        import numpy as np
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.ndarray,)):
+            return make_json_safe(obj.tolist())
+    except Exception:
+        pass
+
+    # torch tensor
+    try:
+        import torch
+        if isinstance(obj, torch.Tensor):
+            if obj.numel() == 1:
+                return float(obj.detach().cpu().item())
+            return make_json_safe(obj.detach().cpu().tolist())
+    except Exception:
+        pass
+
+    # fallback: string representation
+    return str(obj)
 
 
 def _upsert_user(db: Session, email: str, password: str, make_admin: bool = False):
@@ -58,25 +100,19 @@ def health():
 
 @app.get("/debug")
 def debug_info():
-    """
-    SAFE debug endpoint: shows env flags and basic runtime checks.
-    DOES NOT return secrets.
-    """
     demo_mode = os.getenv("DEMO_MODE", "").strip()
     debug_errors = os.getenv("DEBUG_ERRORS", "").strip()
 
-    # Check torch import
     torch_ok = True
     torch_version = None
     torch_error = None
     try:
-        import torch  # noqa
+        import torch
         torch_version = getattr(torch, "__version__", None)
     except Exception as e:
         torch_ok = False
         torch_error = f"{type(e).__name__}: {str(e)}"
 
-    # Check model file presence (both API + worker usually have same paths in repo)
     base_dir = os.path.dirname(__file__)
     model_dir = os.path.join(base_dir, "model_files")
     res18 = os.path.join(model_dir, "alati_dualeye_model_resnet18.pth")
@@ -157,7 +193,7 @@ def presentation_ui():
           <button id="btnAnalyze" onclick="doAnalyze()" disabled>Analyze</button>
         </div>
       </div>
-      <p class="muted">Tip: On iPhone/Android, choose “Take Photo” for live demo.</p>
+      <p class="muted">Debug: <a href="/debug" target="_blank">/debug</a></p>
     </div>
 
     <div class="card">
@@ -165,7 +201,6 @@ def presentation_ui():
       <p id="resultStatus" class="muted">Waiting…</p>
       <pre id="resultBox">—</pre>
       <p id="reportLink" class="muted"></p>
-      <p class="muted">Debug: <a href="/debug" target="_blank">/debug</a></p>
     </div>
 
     <p class="muted">API docs: <a href="/docs" target="_blank">/docs</a> • Health: <a href="/health" target="_blank">/health</a></p>
@@ -248,11 +283,9 @@ async function doAnalyze() {
 
     const scText = await sc.text();
 
-    // Try parse JSON; if not JSON, show raw text (this is your current issue)
-    let scData = null;
-    try { scData = JSON.parse(scText); } catch(e) {
-      throw new Error(scText);
-    }
+    let scData;
+    try { scData = JSON.parse(scText); }
+    catch(e) { throw new Error(scText); }
 
     if (!sc.ok) throw new Error(scData.detail || "Scan failed");
 
@@ -265,7 +298,7 @@ async function doAnalyze() {
       return;
     }
 
-    setStatus(rs, "Queued… (non-demo mode)");
+    setStatus(rs, "Queued…", true);
   } catch (e) {
     setStatus(rs, "Error: " + e.message, false);
   }
@@ -323,8 +356,17 @@ def create_scan(
             raise HTTPException(500, "AI processing failed")
 
         db.refresh(scan)
+
+        # ✅ Make result JSON-safe (prevents 'Internal Server Error' serialization crashes)
+        safe_result = make_json_safe(scan.result)
         report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
-        return {"id": scan.id, "status": scan.status.value, "result": scan.result, "report_url": report_url}
+
+        return {
+            "id": scan.id,
+            "status": scan.status.value,
+            "result": safe_result,
+            "report_url": report_url,
+        }
 
     process_scan.delay(scan.id)
     return {"id": scan.id, "status": scan.status.value, "result": None, "report_url": None}
@@ -336,8 +378,9 @@ def get_scan(scan_id: int, db: Session = Depends(get_db), user_id: int = Depends
     if not scan or scan.user_id != user_id:
         raise HTTPException(404, "Not found")
 
+    safe_result = make_json_safe(scan.result)
     report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
-    return {"id": scan.id, "status": scan.status.value, "result": scan.result, "report_url": report_url}
+    return {"id": scan.id, "status": scan.status.value, "result": safe_result, "report_url": report_url}
 
 
 @app.get("/scan/{scan_id}/report")
@@ -347,4 +390,8 @@ def get_report(scan_id: int, db: Session = Depends(get_db), user_id: int = Depen
         raise HTTPException(404, "Not found")
 
     from fastapi.responses import FileResponse
-    return FileResponse(scan.report_path, media_type="application/pdf", filename=f"alati_report_{scan_id}.pdf")
+    return FileResponse(
+        scan.report_path,
+        media_type="application/pdf",
+        filename=f"alati_report_{scan_id}.pdf",
+    )
