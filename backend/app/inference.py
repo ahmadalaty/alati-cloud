@@ -1,7 +1,7 @@
 import os
 import json
 from collections import OrderedDict
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List
 
 import torch
 import torchvision.transforms as T
@@ -19,11 +19,47 @@ LABELS_PATH   = os.path.join(MODEL_DIR, "labels.json")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def load_labels():
+def _label_to_str(x) -> str:
+    """
+    Accept labels.json formats:
+      1) ["normal","dr",...]
+      2) [{"code":"N","name":"normal"}, ...]
+      3) [{"label":"normal"}, ...]
+    Returns a safe string label.
+    """
+    if isinstance(x, str):
+        return x
+
+    if isinstance(x, dict):
+        # Prefer most informative keys if present
+        for k in ("name", "label", "diagnosis", "class", "title"):
+            v = x.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+
+        # If only "code" exists, use it
+        v = x.get("code")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+
+        # fallback dict -> string
+        return json.dumps(x, ensure_ascii=False)
+
+    # fallback any type -> string
+    return str(x)
+
+
+def load_labels() -> List[str]:
     with open(LABELS_PATH, "r", encoding="utf-8") as f:
-        labels = json.load(f)
-    if not isinstance(labels, list) or not labels:
-        raise RuntimeError("labels.json must be a non-empty JSON list of class labels.")
+        labels_raw = json.load(f)
+
+    if not isinstance(labels_raw, list) or not labels_raw:
+        raise RuntimeError("labels.json must be a non-empty JSON list.")
+
+    labels = [_label_to_str(x) for x in labels_raw]
+
+    # ensure unique + non-empty
+    labels = [x if x else f"class_{i}" for i, x in enumerate(labels)]
     return labels
 
 
@@ -40,39 +76,24 @@ TRANSFORM = T.Compose([
 
 
 def _extract_state_dict(loaded_obj) -> OrderedDict:
-    """
-    Accepts:
-    - raw state_dict (OrderedDict)
-    - checkpoint dict with keys like 'state_dict', 'model_state_dict', etc.
-    Returns an OrderedDict suitable for model.load_state_dict().
-    """
-    # Case 1: already a state_dict
     if isinstance(loaded_obj, OrderedDict):
         return loaded_obj
 
-    # Case 2: checkpoint dict
     if isinstance(loaded_obj, dict):
         for key in ("state_dict", "model_state_dict", "model", "net"):
             if key in loaded_obj and isinstance(loaded_obj[key], (dict, OrderedDict)):
                 sd = loaded_obj[key]
                 return OrderedDict(sd) if not isinstance(sd, OrderedDict) else sd
 
-        # Sometimes the dict IS the state_dict (plain dict of tensors)
-        # Heuristic: contains tensor values and has typical layer keys
         if any(isinstance(v, torch.Tensor) for v in loaded_obj.values()):
             return OrderedDict(loaded_obj)
 
     raise RuntimeError(
-        "Unsupported .pth format. Expected a state_dict (OrderedDict/dict) "
-        "or a checkpoint dict containing state_dict."
+        "Unsupported .pth format. Expected state_dict (OrderedDict/dict) or checkpoint containing state_dict."
     )
 
 
 def _strip_module_prefix(state_dict: OrderedDict) -> OrderedDict:
-    """
-    If trained with DataParallel, keys are like 'module.conv1.weight'.
-    Strip 'module.' so it loads on a normal model.
-    """
     if not state_dict:
         return state_dict
 
@@ -86,9 +107,6 @@ def _strip_module_prefix(state_dict: OrderedDict) -> OrderedDict:
 
 
 def _build_model(variant: str):
-    """
-    Build a ResNet with correct output layer size = NUM_CLASSES
-    """
     v = (variant or "resnet18").strip().lower()
 
     if v == "resnet50":
@@ -97,7 +115,6 @@ def _build_model(variant: str):
         model.fc = torch.nn.Linear(in_features, NUM_CLASSES)
         return model, "resnet50"
 
-    # default: resnet18
     model = models.resnet18(weights=None)
     in_features = model.fc.in_features
     model.fc = torch.nn.Linear(in_features, NUM_CLASSES)
@@ -109,16 +126,19 @@ def _load_model_weights(model: torch.nn.Module, weights_path: str):
     state_dict = _extract_state_dict(loaded)
     state_dict = _strip_module_prefix(state_dict)
 
-    # Load with strict=False to tolerate minor key mismatches if any
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
 
     model.to(DEVICE)
     model.eval()
 
-    return missing, unexpected
+    if missing:
+        print(f"[inference] WARNING missing keys ({len(missing)}): {missing[:8]}{'...' if len(missing)>8 else ''}")
+    if unexpected:
+        print(f"[inference] WARNING unexpected keys ({len(unexpected)}): {unexpected[:8]}{'...' if len(unexpected)>8 else ''}")
+
+    return model
 
 
-# Cache the loaded model in memory
 _CACHED_MODEL = None
 _CACHED_VARIANT = None
 
@@ -139,24 +159,12 @@ def get_model(variant: str = "resnet18") -> Tuple[torch.nn.Module, str]:
     if not os.path.exists(weights_path):
         raise RuntimeError(f"Model weights not found: {weights_path}")
 
-    missing, unexpected = _load_model_weights(model, weights_path)
-
-    # Optional: print to logs (helpful on Render)
-    if missing:
-        print(f"[inference] WARNING missing keys ({len(missing)}): {missing[:8]}{'...' if len(missing)>8 else ''}")
-    if unexpected:
-        print(f"[inference] WARNING unexpected keys ({len(unexpected)}): {unexpected[:8]}{'...' if len(unexpected)>8 else ''}")
-
-    _CACHED_MODEL = model
+    _CACHED_MODEL = _load_model_weights(model, weights_path)
     _CACHED_VARIANT = chosen
     return _CACHED_MODEL, _CACHED_VARIANT
 
 
 def run_inference(image_path: str, eye: str = "left", model_variant: str = "resnet18") -> Dict[str, Any]:
-    """
-    eye parameter kept for future UI/logic (left/right).
-    model_variant: 'resnet18' or 'resnet50'
-    """
     model, chosen_variant = get_model(model_variant)
 
     img = Image.open(image_path).convert("RGB")
@@ -166,7 +174,7 @@ def run_inference(image_path: str, eye: str = "left", model_variant: str = "resn
         logits = model(x)
         probs = torch.sigmoid(logits)[0].detach().cpu()
 
-    probs_dict = {LABELS[i]: float(probs[i].item()) for i in range(NUM_CLASSES)}
+    probs_dict = {str(LABELS[i]): float(probs[i].item()) for i in range(NUM_CLASSES)}
     top_label = max(probs_dict, key=probs_dict.get)
     top_prob = probs_dict[top_label]
 
