@@ -11,6 +11,7 @@ import os
 
 app = FastAPI(title="Alati Cloud API")
 
+# Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
 
 
@@ -29,6 +30,7 @@ def _upsert_user(db: Session, email: str, password: str, make_admin: bool = Fals
         db.commit()
         return
 
+    # Update password every startup so env changes always apply
     user.password_hash = hash_password(password)
     if make_admin and hasattr(user, "is_admin"):
         user.is_admin = True
@@ -40,8 +42,10 @@ def _upsert_user(db: Session, email: str, password: str, make_admin: bool = Fals
 def seed():
     db = SessionLocal()
     try:
+        # Keep MVP default admin (local testing)
         _upsert_user(db, "admin@alati.ai", "admin123", make_admin=True)
 
+        # Owner account from Render Environment Variables
         owner_email = os.getenv("OWNER_EMAIL", "").strip()
         owner_password = os.getenv("OWNER_PASSWORD", "").strip()
         if owner_email and owner_password:
@@ -57,6 +61,7 @@ def health():
 
 @app.get("/", response_class=HTMLResponse)
 def presentation_ui():
+    # Simple, investor-friendly UI served directly from the API.
     return """
 <!doctype html>
 <html>
@@ -187,12 +192,14 @@ async function doAnalyze() {
       headers: { "Authorization": "Bearer " + TOKEN },
       body: form
     });
+
     const upText = await up.text();
     let upData;
     try { upData = JSON.parse(upText); } catch(e) { throw new Error(upText); }
     if (!up.ok) throw new Error(upData.detail || "Upload failed");
 
     setStatus(rs, "Running AI…");
+
     const sc = await fetch("/scan/create", {
       method: "POST",
       headers: {
@@ -201,6 +208,7 @@ async function doAnalyze() {
       },
       body: JSON.stringify({ upload_id: upData.upload_id, eye })
     });
+
     const scText = await sc.text();
     let scData;
     try { scData = JSON.parse(scText); } catch(e) { throw new Error(scText); }
@@ -238,6 +246,7 @@ async function doAnalyze() {
         }
         return;
       }
+
       if (gData.status === "failed") {
         setStatus(rs, "Failed ❌", false);
         rb.textContent = JSON.stringify(gData.result || {error:"failed"}, null, 2);
@@ -245,7 +254,7 @@ async function doAnalyze() {
       }
     }
 
-    setStatus(rs, "Still processing… try again or check worker logs.", false);
+    setStatus(rs, "Still processing… try again or check logs.", false);
   } catch (e) {
     setStatus(rs, "Error: " + e.message, false);
   }
@@ -280,6 +289,7 @@ def create_scan(
     db: Session = Depends(get_db),
     user_id: int = Depends(require_user),
 ):
+    # Use same helper as upload, so Render storage path matches.
     image_path = upload_target_path(body.upload_id)
     if not os.path.exists(image_path):
         raise HTTPException(400, "Upload not found")
@@ -294,14 +304,13 @@ def create_scan(
     db.commit()
     db.refresh(scan)
 
-    # ✅ DEMO MODE: run AI inside API for reliability (no worker/storage sharing issues)
+    # DEMO MODE: run task body synchronously inside the API process
     if os.getenv("DEMO_MODE", "").strip() == "1":
         try:
-            process_scan(scan.id)  # synchronous
-        except Exception as e:
-            raise HTTPException(500, f"AI processing failed: {str(e)}")
+            process_scan.run(scan.id)  # ✅ correct synchronous execution
+        except Exception:
+            raise HTTPException(500, "AI processing failed")
 
-        # reload scan to return immediate results
         db.refresh(scan)
         report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
         return {
