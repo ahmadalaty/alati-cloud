@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session
-from .db import Base, engine, get_db
+from .db import Base, engine, get_db, SessionLocal
 from .models import User, Scan, ScanStatus
 from .schemas import LoginRequest, TokenResponse, ScanCreateRequest, ScanResponse
 from .auth import hash_password, verify_password, create_token, require_user
@@ -14,14 +14,56 @@ app = FastAPI(title="Alati Cloud API")
 # Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
 
-# Create a default user for MVP (remove later)
+
+def _upsert_user(db: Session, email: str, password: str, make_admin: bool = False):
+    """
+    Create the user if missing, otherwise update their password.
+    This prevents 'Invalid credentials' confusion in demos.
+    """
+    email = (email or "").strip().lower()
+    password = (password or "").strip()
+    if not email or not password:
+        return
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        user = User(email=email, password_hash=hash_password(password))
+        # If your User model has is_admin, set it
+        if make_admin and hasattr(user, "is_admin"):
+            user.is_admin = True
+        db.add(user)
+        db.commit()
+        return
+
+    # Update password every startup so Render password changes always apply
+    user.password_hash = hash_password(password)
+    if make_admin and hasattr(user, "is_admin"):
+        user.is_admin = True
+    db.add(user)
+    db.commit()
+
+
 @app.on_event("startup")
 def seed():
-    db = next(get_db())
-    if not db.query(User).filter(User.email == "admin@alati.ai").first():
-        u = User(email="admin@alati.ai", password_hash=hash_password("admin123"))
-        db.add(u)
-        db.commit()
+    """
+    Startup bootstrap:
+    1) Keep MVP default admin user.
+    2) Ensure OWNER user exists in cloud DB based on Render env vars.
+    """
+    db = SessionLocal()
+    try:
+        # 1) Default MVP admin (keep for now)
+        _upsert_user(db, "admin@alati.ai", "admin123", make_admin=True)
+
+        # 2) Owner account from Render Environment Variables
+        owner_email = os.getenv("OWNER_EMAIL", "").strip()
+        owner_password = os.getenv("OWNER_PASSWORD", "").strip()
+        if owner_email and owner_password:
+            _upsert_user(db, owner_email, owner_password, make_admin=True)
+
+    finally:
+        db.close()
+
 
 @app.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
@@ -29,6 +71,7 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(401, "Invalid credentials")
     return {"access_token": create_token(user.id)}
+
 
 @app.post("/upload")
 async def upload_image(
@@ -38,6 +81,7 @@ async def upload_image(
     upload_id = new_upload_id()
     path = await save_upload(upload_id, file)
     return {"upload_id": upload_id, "path": path}
+
 
 @app.post("/scan/create", response_model=ScanResponse)
 def create_scan(
@@ -68,6 +112,7 @@ def create_scan(
         "report_url": None,
     }
 
+
 @app.get("/scan/{scan_id}", response_model=ScanResponse)
 def get_scan(
     scan_id: int,
@@ -78,7 +123,11 @@ def get_scan(
     if not scan or scan.user_id != user_id:
         raise HTTPException(404, "Not found")
 
-    report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
+    report_url = (
+        f"/scan/{scan.id}/report"
+        if scan.report_path and scan.status == ScanStatus.done
+        else None
+    )
 
     return {
         "id": scan.id,
@@ -86,6 +135,7 @@ def get_scan(
         "result": scan.result,
         "report_url": report_url,
     }
+
 
 @app.get("/scan/{scan_id}/report")
 def get_report(
