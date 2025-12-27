@@ -10,8 +10,6 @@ from .tasks import process_scan
 import os
 
 app = FastAPI(title="Alati Cloud API")
-
-# Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
 
 
@@ -30,7 +28,6 @@ def _upsert_user(db: Session, email: str, password: str, make_admin: bool = Fals
         db.commit()
         return
 
-    # Update password every startup so env changes always apply
     user.password_hash = hash_password(password)
     if make_admin and hasattr(user, "is_admin"):
         user.is_admin = True
@@ -42,10 +39,8 @@ def _upsert_user(db: Session, email: str, password: str, make_admin: bool = Fals
 def seed():
     db = SessionLocal()
     try:
-        # Keep MVP default admin (local testing)
         _upsert_user(db, "admin@alati.ai", "admin123", make_admin=True)
 
-        # Owner account from Render Environment Variables
         owner_email = os.getenv("OWNER_EMAIL", "").strip()
         owner_password = os.getenv("OWNER_PASSWORD", "").strip()
         if owner_email and owner_password:
@@ -61,7 +56,6 @@ def health():
 
 @app.get("/", response_class=HTMLResponse)
 def presentation_ui():
-    # Simple, investor-friendly UI served directly from the API.
     return """
 <!doctype html>
 <html>
@@ -214,7 +208,6 @@ async function doAnalyze() {
     try { scData = JSON.parse(scText); } catch(e) { throw new Error(scText); }
     if (!sc.ok) throw new Error(scData.detail || "Scan failed");
 
-    // In DEMO_MODE we return done immediately
     if (scData.status === "done") {
       setStatus(rs, "Done ✅", true);
       rb.textContent = JSON.stringify(scData.result, null, 2);
@@ -224,37 +217,7 @@ async function doAnalyze() {
       return;
     }
 
-    // Otherwise, poll (non-demo)
-    const scanId = scData.id;
-    setStatus(rs, "Queued…");
-
-    for (let i=0; i<30; i++) {
-      await new Promise(res => setTimeout(res, 1500));
-      const g = await fetch(`/scan/${scanId}`, {
-        headers: { "Authorization": "Bearer " + TOKEN }
-      });
-      const gText = await g.text();
-      let gData;
-      try { gData = JSON.parse(gText); } catch(e) { throw new Error(gText); }
-      if (!g.ok) throw new Error(gData.detail || "Scan get failed");
-
-      if (gData.status === "done") {
-        setStatus(rs, "Done ✅", true);
-        rb.textContent = JSON.stringify(gData.result, null, 2);
-        if (gData.report_url) {
-          rl.innerHTML = `Report: <a href="${gData.report_url}" target="_blank">Download PDF</a>`;
-        }
-        return;
-      }
-
-      if (gData.status === "failed") {
-        setStatus(rs, "Failed ❌", false);
-        rb.textContent = JSON.stringify(gData.result || {error:"failed"}, null, 2);
-        return;
-      }
-    }
-
-    setStatus(rs, "Still processing… try again or check logs.", false);
+    setStatus(rs, "Queued… (non-demo mode)");
   } catch (e) {
     setStatus(rs, "Error: " + e.message, false);
   }
@@ -289,7 +252,6 @@ def create_scan(
     db: Session = Depends(get_db),
     user_id: int = Depends(require_user),
 ):
-    # Use same helper as upload, so Render storage path matches.
     image_path = upload_target_path(body.upload_id)
     if not os.path.exists(image_path):
         raise HTTPException(400, "Upload not found")
@@ -304,11 +266,13 @@ def create_scan(
     db.commit()
     db.refresh(scan)
 
-    # DEMO MODE: run task body synchronously inside the API process
+    # DEMO MODE: run locally in API (no celery/worker dependency)
     if os.getenv("DEMO_MODE", "").strip() == "1":
         try:
-            process_scan.run(scan.id)  # ✅ correct synchronous execution
-        except Exception:
+            process_scan.run(scan.id)
+        except Exception as e:
+            if os.getenv("DEBUG_ERRORS", "").strip() == "1":
+                raise HTTPException(500, f"AI processing failed: {type(e).__name__}: {str(e)}")
             raise HTTPException(500, "AI processing failed")
 
         db.refresh(scan)
@@ -320,50 +284,25 @@ def create_scan(
             "report_url": report_url,
         }
 
-    # Normal async mode
     process_scan.delay(scan.id)
-
-    return {
-        "id": scan.id,
-        "status": scan.status.value,
-        "result": None,
-        "report_url": None,
-    }
+    return {"id": scan.id, "status": scan.status.value, "result": None, "report_url": None}
 
 
 @app.get("/scan/{scan_id}", response_model=ScanResponse)
-def get_scan(
-    scan_id: int,
-    db: Session = Depends(get_db),
-    user_id: int = Depends(require_user),
-):
+def get_scan(scan_id: int, db: Session = Depends(get_db), user_id: int = Depends(require_user)):
     scan = db.get(Scan, scan_id)
     if not scan or scan.user_id != user_id:
         raise HTTPException(404, "Not found")
 
     report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
-
-    return {
-        "id": scan.id,
-        "status": scan.status.value,
-        "result": scan.result,
-        "report_url": report_url,
-    }
+    return {"id": scan.id, "status": scan.status.value, "result": scan.result, "report_url": report_url}
 
 
 @app.get("/scan/{scan_id}/report")
-def get_report(
-    scan_id: int,
-    db: Session = Depends(get_db),
-    user_id: int = Depends(require_user),
-):
+def get_report(scan_id: int, db: Session = Depends(get_db), user_id: int = Depends(require_user)):
     scan = db.get(Scan, scan_id)
     if not scan or scan.user_id != user_id or not scan.report_path:
         raise HTTPException(404, "Not found")
 
     from fastapi.responses import FileResponse
-    return FileResponse(
-        scan.report_path,
-        media_type="application/pdf",
-        filename=f"alati_report_{scan_id}.pdf",
-    )
+    return FileResponse(scan.report_path, media_type="application/pdf", filename=f"alati_report_{scan_id}.pdf")
