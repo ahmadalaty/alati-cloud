@@ -70,6 +70,19 @@ def decode_db_result(val):
     return {"raw": str(val)}
 
 
+def normalize_eye_for_db(eye: str) -> str:
+    """
+    DB column scans.eye is VARCHAR(2).
+    Store as 'L' or 'R' to avoid 'value too long for type character varying(2)'.
+    """
+    e = (eye or "").strip().lower()
+    if e in ("left", "l"):
+        return "L"
+    if e in ("right", "r"):
+        return "R"
+    return "L"
+
+
 def _upsert_user(db: Session, email: str, password: str, make_admin: bool = False):
     email = (email or "").strip().lower()
     password = (password or "").strip()
@@ -342,7 +355,9 @@ def create_scan(body: ScanCreateRequest, db: Session = Depends(get_db), user_id:
     if not os.path.exists(image_path):
         raise HTTPException(400, "Upload not found")
 
-    scan = Scan(user_id=user_id, eye=body.eye, image_path=image_path, status=ScanStatus.queued)
+    eye_db = normalize_eye_for_db(body.eye)
+
+    scan = Scan(user_id=user_id, eye=eye_db, image_path=image_path, status=ScanStatus.queued)
     db.add(scan)
     db.commit()
     db.refresh(scan)
@@ -357,12 +372,10 @@ def create_scan(body: ScanCreateRequest, db: Session = Depends(get_db), user_id:
 
         db.refresh(scan)
 
-        # scan.result is stored as JSON string in DB -> decode back
         safe_result = decode_db_result(scan.result)
         safe_result = make_json_safe(safe_result)
 
         report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
-
         return {"id": scan.id, "status": scan.status.value, "result": safe_result, "report_url": report_url}
 
     process_scan.delay(scan.id)
