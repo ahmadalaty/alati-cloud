@@ -1,4 +1,5 @@
 import os
+import json
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
@@ -15,10 +16,6 @@ Base.metadata.create_all(bind=engine)
 
 
 def make_json_safe(obj):
-    """
-    Convert numpy / torch types into plain Python types so FastAPI can JSON-serialize them.
-    This is the #1 cause of 'Internal Server Error' after inference.
-    """
     # None / primitives
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
@@ -31,7 +28,7 @@ def make_json_safe(obj):
     if isinstance(obj, (list, tuple, set)):
         return [make_json_safe(x) for x in obj]
 
-    # numpy scalars / arrays
+    # numpy
     try:
         import numpy as np
         if isinstance(obj, (np.integer,)):
@@ -43,7 +40,7 @@ def make_json_safe(obj):
     except Exception:
         pass
 
-    # torch tensor
+    # torch
     try:
         import torch
         if isinstance(obj, torch.Tensor):
@@ -53,8 +50,24 @@ def make_json_safe(obj):
     except Exception:
         pass
 
-    # fallback: string representation
     return str(obj)
+
+
+def decode_db_result(val):
+    """
+    Our DB stores scan.result as TEXT (JSON string).
+    This converts it back into a dict for the API response.
+    """
+    if val is None:
+        return None
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str):
+        try:
+            return json.loads(val)
+        except Exception:
+            return {"raw": val}
+    return {"raw": str(val)}
 
 
 def _upsert_user(db: Session, email: str, password: str, make_admin: bool = False):
@@ -282,7 +295,6 @@ async function doAnalyze() {
     });
 
     const scText = await sc.text();
-
     let scData;
     try { scData = JSON.parse(scText); }
     catch(e) { throw new Error(scText); }
@@ -318,31 +330,19 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/upload")
-async def upload_image(
-    file: UploadFile = File(...),
-    user_id: int = Depends(require_user),
-):
+async def upload_image(file: UploadFile = File(...), user_id: int = Depends(require_user)):
     upload_id = new_upload_id()
     path = await save_upload(upload_id, file)
     return {"upload_id": upload_id, "path": path}
 
 
 @app.post("/scan/create", response_model=ScanResponse)
-def create_scan(
-    body: ScanCreateRequest,
-    db: Session = Depends(get_db),
-    user_id: int = Depends(require_user),
-):
+def create_scan(body: ScanCreateRequest, db: Session = Depends(get_db), user_id: int = Depends(require_user)):
     image_path = upload_target_path(body.upload_id)
     if not os.path.exists(image_path):
         raise HTTPException(400, "Upload not found")
 
-    scan = Scan(
-        user_id=user_id,
-        eye=body.eye,
-        image_path=image_path,
-        status=ScanStatus.queued,
-    )
+    scan = Scan(user_id=user_id, eye=body.eye, image_path=image_path, status=ScanStatus.queued)
     db.add(scan)
     db.commit()
     db.refresh(scan)
@@ -357,16 +357,13 @@ def create_scan(
 
         db.refresh(scan)
 
-        # ✅ Make result JSON-safe (prevents 'Internal Server Error' serialization crashes)
-        safe_result = make_json_safe(scan.result)
+        # scan.result is stored as JSON string in DB -> decode back
+        safe_result = decode_db_result(scan.result)
+        safe_result = make_json_safe(safe_result)
+
         report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
 
-        return {
-            "id": scan.id,
-            "status": scan.status.value,
-            "result": safe_result,
-            "report_url": report_url,
-        }
+        return {"id": scan.id, "status": scan.status.value, "result": safe_result, "report_url": report_url}
 
     process_scan.delay(scan.id)
     return {"id": scan.id, "status": scan.status.value, "result": None, "report_url": None}
@@ -378,7 +375,9 @@ def get_scan(scan_id: int, db: Session = Depends(get_db), user_id: int = Depends
     if not scan or scan.user_id != user_id:
         raise HTTPException(404, "Not found")
 
-    safe_result = make_json_safe(scan.result)
+    safe_result = decode_db_result(scan.result)
+    safe_result = make_json_safe(safe_result)
+
     report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
     return {"id": scan.id, "status": scan.status.value, "result": safe_result, "report_url": report_url}
 
@@ -390,8 +389,4 @@ def get_report(scan_id: int, db: Session = Depends(get_db), user_id: int = Depen
         raise HTTPException(404, "Not found")
 
     from fastapi.responses import FileResponse
-    return FileResponse(
-        scan.report_path,
-        media_type="application/pdf",
-        filename=f"alati_report_{scan_id}.pdf",
-    )
+    return FileResponse(scan.report_path, media_type="application/pdf", filename=f"alati_report_{scan_id}.pdf")
