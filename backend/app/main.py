@@ -11,7 +11,6 @@ import os
 
 app = FastAPI(title="Alati Cloud API")
 
-# Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
 
 
@@ -87,7 +86,7 @@ def presentation_ui():
 <body>
   <div class="wrap">
     <h1>Alati Cloud</h1>
-    <p class="sub">Live fundus AI demo (secure cloud). Login → upload → analyze → report.</p>
+    <p class="sub">Live fundus AI demo. Login → upload → analyze → report.</p>
 
     <div class="card">
       <h3 style="margin:0 0 8px;">1) Login</h3>
@@ -193,7 +192,7 @@ async function doAnalyze() {
     try { upData = JSON.parse(upText); } catch(e) { throw new Error(upText); }
     if (!up.ok) throw new Error(upData.detail || "Upload failed");
 
-    setStatus(rs, "Creating scan…");
+    setStatus(rs, "Running AI…");
     const sc = await fetch("/scan/create", {
       method: "POST",
       headers: {
@@ -205,10 +204,21 @@ async function doAnalyze() {
     const scText = await sc.text();
     let scData;
     try { scData = JSON.parse(scText); } catch(e) { throw new Error(scText); }
-    if (!sc.ok) throw new Error(scData.detail || "Scan create failed");
+    if (!sc.ok) throw new Error(scData.detail || "Scan failed");
 
+    // In DEMO_MODE we return done immediately
+    if (scData.status === "done") {
+      setStatus(rs, "Done ✅", true);
+      rb.textContent = JSON.stringify(scData.result, null, 2);
+      if (scData.report_url) {
+        rl.innerHTML = `Report: <a href="${scData.report_url}" target="_blank">Download PDF</a>`;
+      }
+      return;
+    }
+
+    // Otherwise, poll (non-demo)
     const scanId = scData.id;
-    setStatus(rs, "Analyzing… (cloud AI running)");
+    setStatus(rs, "Queued…");
 
     for (let i=0; i<30; i++) {
       await new Promise(res => setTimeout(res, 1500));
@@ -228,7 +238,6 @@ async function doAnalyze() {
         }
         return;
       }
-
       if (gData.status === "failed") {
         setStatus(rs, "Failed ❌", false);
         rb.textContent = JSON.stringify(gData.result || {error:"failed"}, null, 2);
@@ -271,7 +280,6 @@ def create_scan(
     db: Session = Depends(get_db),
     user_id: int = Depends(require_user),
 ):
-    # IMPORTANT: use the same storage helper as upload, so Render /tmp works.
     image_path = upload_target_path(body.upload_id)
     if not os.path.exists(image_path):
         raise HTTPException(400, "Upload not found")
@@ -286,6 +294,24 @@ def create_scan(
     db.commit()
     db.refresh(scan)
 
+    # ✅ DEMO MODE: run AI inside API for reliability (no worker/storage sharing issues)
+    if os.getenv("DEMO_MODE", "").strip() == "1":
+        try:
+            process_scan(scan.id)  # synchronous
+        except Exception as e:
+            raise HTTPException(500, f"AI processing failed: {str(e)}")
+
+        # reload scan to return immediate results
+        db.refresh(scan)
+        report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
+        return {
+            "id": scan.id,
+            "status": scan.status.value,
+            "result": scan.result,
+            "report_url": report_url,
+        }
+
+    # Normal async mode
     process_scan.delay(scan.id)
 
     return {
