@@ -46,34 +46,43 @@ def _json_safe(obj):
     return obj
 
 
+def normalize_eye_for_inference(eye: str) -> str:
+    e = (eye or "").strip().lower()
+    if e in ("l", "left"):
+        return "left"
+    if e in ("r", "right"):
+        return "right"
+    # if DB stores "L"/"R"
+    if e == "l":
+        return "left"
+    if e == "r":
+        return "right"
+    return "left"
+
+
 @celery_app.task(name="app.tasks.process_scan")
 def process_scan(scan_id: int):
     db: Session = SessionLocal()
     try:
         scan = db.get(Scan, scan_id)
         if not scan:
-            print(f"[process_scan] scan {scan_id} not found")
             return
 
-        print(f"[process_scan] scan={scan.id} eye={scan.eye} path={scan.image_path}")
+        eye_for_ai = normalize_eye_for_inference(scan.eye)
 
-        result = run_inference(scan.image_path, scan.eye)
+        result = run_inference(scan.image_path, eye_for_ai)
         result = _json_safe(result)
 
         scan.result = json.dumps(result, ensure_ascii=False)
+
         report_path = create_pdf_report(scan_id=scan.id, result=result)
         scan.report_path = report_path
-        scan.status = ScanStatus.done
 
+        scan.status = ScanStatus.done
         db.add(scan)
         db.commit()
 
-        print(f"[process_scan] scan={scan.id} committed OK status={scan.status}")
-
     except Exception as e:
-        # THIS print will show the real SQLAlchemy/psycopg error in Render logs
-        print(f"[process_scan] ERROR {type(e).__name__}: {str(e)}")
-
         try:
             scan = db.get(Scan, scan_id)
             if scan:
@@ -81,9 +90,8 @@ def process_scan(scan_id: int):
                 scan.result = json.dumps({"error": f"{type(e).__name__}: {str(e)}"}, ensure_ascii=False)
                 db.add(scan)
                 db.commit()
-        except Exception as e2:
-            print(f"[process_scan] FAILED to mark failed: {type(e2).__name__}: {str(e2)}")
-
+        except Exception:
+            pass
         raise
     finally:
         db.close()
