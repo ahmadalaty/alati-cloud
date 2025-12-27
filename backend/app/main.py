@@ -1,27 +1,52 @@
 import os
 import json
-from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Header, Query
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from .db import Base, engine, get_db, SessionLocal
 from .models import User, Scan, ScanStatus
 from .schemas import LoginRequest, TokenResponse, ScanCreateRequest, ScanResponse
-from .auth import hash_password, verify_password, create_token, require_user, decode_token
+from .auth import (
+    hash_password,
+    verify_password,
+    create_token,
+    require_user,
+    decode_token,
+)
 from .storage import new_upload_id, save_upload, upload_target_path
 from .tasks import process_scan
 
 app = FastAPI(title="Alati Cloud API")
+
+
+# ==========================================================
+# DATABASE INIT (DEMO MODE SAFE REBUILD)
+# ==========================================================
+# This fixes the VARCHAR(2) -> VARCHAR(5) issue for `eye`
+# Only rebuilds DB when DEMO_MODE=1
+# ==========================================================
+
+if os.getenv("DEMO_MODE", "").strip() == "1":
+    Base.metadata.drop_all(bind=engine)
+
 Base.metadata.create_all(bind=engine)
 
+
+# ==========================================================
+# UTILS
+# ==========================================================
 
 def make_json_safe(obj):
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
+
     if isinstance(obj, dict):
         return {str(k): make_json_safe(v) for k, v in obj.items()}
+
     if isinstance(obj, (list, tuple, set)):
         return [make_json_safe(x) for x in obj]
+
     try:
         import numpy as np
         if isinstance(obj, (np.integer,)):
@@ -32,6 +57,7 @@ def make_json_safe(obj):
             return make_json_safe(obj.tolist())
     except Exception:
         pass
+
     try:
         import torch
         if isinstance(obj, torch.Tensor):
@@ -40,14 +66,11 @@ def make_json_safe(obj):
             return make_json_safe(obj.detach().cpu().tolist())
     except Exception:
         pass
+
     return str(obj)
 
 
 def decode_db_result(val):
-    """
-    DB stores scan.result as TEXT (JSON string).
-    Convert it back into dict for API/UI responses.
-    """
     if val is None:
         return None
     if isinstance(val, dict):
@@ -60,7 +83,11 @@ def decode_db_result(val):
     return {"raw": str(val)}
 
 
-def _upsert_user(db: Session, email: str, password: str, make_admin: bool = False):
+# ==========================================================
+# USER SEEDING
+# ==========================================================
+
+def _upsert_user(db: Session, email: str, password: str):
     email = (email or "").strip().lower()
     password = (password or "").strip()
     if not email or not password:
@@ -69,32 +96,32 @@ def _upsert_user(db: Session, email: str, password: str, make_admin: bool = Fals
     user = db.query(User).filter(User.email == email).first()
     if not user:
         user = User(email=email, password_hash=hash_password(password))
-        if make_admin and hasattr(user, "is_admin"):
-            user.is_admin = True
         db.add(user)
-        db.commit()
-        return
+    else:
+        user.password_hash = hash_password(password)
 
-    user.password_hash = hash_password(password)
-    if make_admin and hasattr(user, "is_admin"):
-        user.is_admin = True
-    db.add(user)
     db.commit()
 
 
 @app.on_event("startup")
-def seed():
+def seed_users():
     db = SessionLocal()
     try:
-        _upsert_user(db, "admin@alati.ai", "admin123", make_admin=True)
+        # default demo admin
+        _upsert_user(db, "admin@alati.ai", "admin123")
 
+        # owner account from Render env vars
         owner_email = os.getenv("OWNER_EMAIL", "").strip()
         owner_password = os.getenv("OWNER_PASSWORD", "").strip()
         if owner_email and owner_password:
-            _upsert_user(db, owner_email, owner_password, make_admin=True)
+            _upsert_user(db, owner_email, owner_password)
     finally:
         db.close()
 
+
+# ==========================================================
+# BASIC ENDPOINTS
+# ==========================================================
 
 @app.get("/health")
 def health():
@@ -103,214 +130,32 @@ def health():
 
 @app.get("/debug")
 def debug_info():
-    demo_mode = os.getenv("DEMO_MODE", "").strip()
-    debug_errors = os.getenv("DEBUG_ERRORS", "").strip()
-
-    torch_ok = True
-    torch_version = None
-    torch_error = None
     try:
         import torch
-        torch_version = getattr(torch, "__version__", None)
+        torch_version = torch.__version__
+        torch_ok = True
     except Exception as e:
         torch_ok = False
-        torch_error = f"{type(e).__name__}: {str(e)}"
+        torch_version = str(e)
 
     base_dir = os.path.dirname(__file__)
     model_dir = os.path.join(base_dir, "model_files")
-    res18 = os.path.join(model_dir, "alati_dualeye_model_resnet18.pth")
-    res50 = os.path.join(model_dir, "alati_dualeye_model_resnet50.pth")
-    labels = os.path.join(model_dir, "labels.json")
 
     return {
-        "demo_mode": demo_mode,
-        "debug_errors": debug_errors,
+        "demo_mode": os.getenv("DEMO_MODE", ""),
+        "debug_errors": os.getenv("DEBUG_ERRORS", ""),
         "torch_ok": torch_ok,
         "torch_version": torch_version,
-        "torch_error": torch_error,
         "model_dir": model_dir,
-        "resnet18_exists": os.path.exists(res18),
-        "resnet50_exists": os.path.exists(res50),
-        "labels_exists": os.path.exists(labels),
+        "resnet18_exists": os.path.exists(os.path.join(model_dir, "alati_dualeye_model_resnet18.pth")),
+        "resnet50_exists": os.path.exists(os.path.join(model_dir, "alati_dualeye_model_resnet50.pth")),
+        "labels_exists": os.path.exists(os.path.join(model_dir, "labels.json")),
     }
 
 
-@app.get("/", response_class=HTMLResponse)
-def presentation_ui():
-    return """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Alati Cloud</title>
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #0b1020; color: #e8ecff; }
-    .wrap { max-width: 720px; margin: 0 auto; padding: 28px 16px 48px; }
-    .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 16px; padding: 16px; margin: 14px 0; }
-    h1 { font-size: 28px; margin: 0 0 6px; }
-    .sub { opacity: 0.85; margin: 0 0 18px; }
-    label { display:block; font-size: 13px; opacity: 0.85; margin: 10px 0 6px; }
-    input, select, button { width: 100%; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.25); color: #e8ecff; font-size: 15px; }
-    button { cursor: pointer; background: #355dff; border: 0; font-weight: 700; }
-    button:disabled { opacity: 0.6; cursor: not-allowed; }
-    .row { display:flex; gap: 12px; }
-    .row > div { flex: 1; }
-    .muted { opacity: 0.8; font-size: 13px; }
-    pre { white-space: pre-wrap; word-break: break-word; background: rgba(0,0,0,0.35); padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.12); }
-    a { color: #9fb3ff; }
-    .ok { color: #67ffb1; font-weight: 700; }
-    .bad { color: #ff8a8a; font-weight: 700; }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <h1>Alati Cloud</h1>
-    <p class="sub">Live fundus AI demo. Login → upload → analyze → report.</p>
-
-    <div class="card">
-      <h3 style="margin:0 0 8px;">1) Login</h3>
-      <label>Email</label>
-      <input id="email" placeholder="ahmadalaty@gmail.com" />
-      <label>Password</label>
-      <input id="password" type="password" placeholder="••••••••" />
-      <div style="height:10px"></div>
-      <button id="btnLogin" onclick="doLogin()">Login</button>
-      <p id="loginStatus" class="muted"></p>
-    </div>
-
-    <div class="card">
-      <h3 style="margin:0 0 8px;">2) Upload fundus image</h3>
-      <label>Select image</label>
-      <input id="file" type="file" accept="image/*" />
-      <div class="row">
-        <div>
-          <label>Eye</label>
-          <select id="eye">
-            <option value="left">Left</option>
-            <option value="right">Right</option>
-          </select>
-        </div>
-        <div>
-          <label>&nbsp;</label>
-          <button id="btnAnalyze" onclick="doAnalyze()" disabled>Analyze</button>
-        </div>
-      </div>
-      <p class="muted">Debug: <a href="/debug" target="_blank">/debug</a></p>
-    </div>
-
-    <div class="card">
-      <h3 style="margin:0 0 8px;">3) Result</h3>
-      <p id="resultStatus" class="muted">Waiting…</p>
-      <pre id="resultBox">—</pre>
-      <p id="reportLink" class="muted"></p>
-    </div>
-
-    <p class="muted">API docs: <a href="/docs" target="_blank">/docs</a> • Health: <a href="/health" target="_blank">/health</a></p>
-  </div>
-
-<script>
-let TOKEN = null;
-
-function setStatus(el, msg, ok=null) {
-  el.textContent = msg;
-  if (ok === true) el.className = "muted ok";
-  else if (ok === false) el.className = "muted bad";
-  else el.className = "muted";
-}
-
-async function doLogin() {
-  const email = document.getElementById("email").value.trim();
-  const password = document.getElementById("password").value;
-  const st = document.getElementById("loginStatus");
-  setStatus(st, "Logging in…");
-
-  try {
-    const r = await fetch("/auth/login", {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({email, password})
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || "Login failed");
-    TOKEN = data.access_token;
-    setStatus(st, "Login OK ✅", true);
-    document.getElementById("btnAnalyze").disabled = false;
-  } catch (e) {
-    TOKEN = null;
-    document.getElementById("btnAnalyze").disabled = true;
-    setStatus(st, "Login failed: " + e.message, false);
-  }
-}
-
-async function doAnalyze() {
-  const fileInput = document.getElementById("file");
-  const eye = document.getElementById("eye").value;
-  const rs = document.getElementById("resultStatus");
-  const rb = document.getElementById("resultBox");
-  const rl = document.getElementById("reportLink");
-
-  rl.textContent = "";
-  rb.textContent = "—";
-
-  if (!TOKEN) { setStatus(rs, "Please login first.", false); return; }
-  if (!fileInput.files || !fileInput.files[0]) { setStatus(rs, "Please select an image.", false); return; }
-
-  setStatus(rs, "Uploading image…");
-
-  try {
-    const form = new FormData();
-    form.append("file", fileInput.files[0]);
-
-    const up = await fetch("/upload", {
-      method: "POST",
-      headers: { "Authorization": "Bearer " + TOKEN },
-      body: form
-    });
-
-    const upText = await up.text();
-    let upData;
-    try { upData = JSON.parse(upText); } catch(e) { throw new Error(upText); }
-    if (!up.ok) throw new Error(upData.detail || "Upload failed");
-
-    setStatus(rs, "Running AI…");
-
-    const sc = await fetch("/scan/create", {
-      method: "POST",
-      headers: {
-        "Content-Type":"application/json",
-        "Authorization":"Bearer " + TOKEN
-      },
-      body: JSON.stringify({ upload_id: upData.upload_id, eye })
-    });
-
-    const scText = await sc.text();
-    let scData;
-    try { scData = JSON.parse(scText); }
-    catch(e) { throw new Error(scText); }
-
-    if (!sc.ok) throw new Error(scData.detail || "Scan failed");
-
-    setStatus(rs, "Done ✅", true);
-    rb.textContent = JSON.stringify(scData.result, null, 2);
-
-    if (scData.report_url) {
-      // ✅ Browser-safe report download: include token in URL
-      const url = scData.report_url + "?token=" + encodeURIComponent(TOKEN);
-      rl.innerHTML = `Report: <a href="${url}" target="_blank">Download PDF</a>`;
-    } else {
-      rl.textContent = "No report available.";
-    }
-
-  } catch (e) {
-    setStatus(rs, "Error: " + e.message, false);
-  }
-}
-</script>
-</body>
-</html>
-"""
-
+# ==========================================================
+# AUTH
+# ==========================================================
 
 @app.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
@@ -320,82 +165,113 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     return {"access_token": create_token(user.id)}
 
 
+# ==========================================================
+# UPLOAD & SCAN
+# ==========================================================
+
 @app.post("/upload")
-async def upload_image(file: UploadFile = File(...), user_id: int = Depends(require_user)):
+async def upload_image(
+    file: UploadFile = File(...),
+    user_id: int = Depends(require_user),
+):
     upload_id = new_upload_id()
     path = await save_upload(upload_id, file)
     return {"upload_id": upload_id, "path": path}
 
 
 @app.post("/scan/create", response_model=ScanResponse)
-def create_scan(body: ScanCreateRequest, db: Session = Depends(get_db), user_id: int = Depends(require_user)):
+def create_scan(
+    body: ScanCreateRequest,
+    db: Session = Depends(get_db),
+    user_id: int = Depends(require_user),
+):
     image_path = upload_target_path(body.upload_id)
     if not os.path.exists(image_path):
         raise HTTPException(400, "Upload not found")
 
-    scan = Scan(user_id=user_id, eye=body.eye, image_path=image_path, status=ScanStatus.queued)
+    scan = Scan(
+        user_id=user_id,
+        eye=body.eye,  # "left" / "right" now fits DB
+        image_path=image_path,
+        status=ScanStatus.queued,
+    )
+
     db.add(scan)
     db.commit()
     db.refresh(scan)
 
-    # DEMO_MODE: run sync in API for demos (no worker needed)
+    # DEMO_MODE: run inline (no worker dependency)
     if os.getenv("DEMO_MODE", "").strip() == "1":
         try:
             process_scan.run(scan.id)
         except Exception as e:
             if os.getenv("DEBUG_ERRORS", "").strip() == "1":
-                raise HTTPException(500, f"AI processing failed: {type(e).__name__}: {str(e)}")
+                raise HTTPException(500, f"AI processing failed: {e}")
             raise HTTPException(500, "AI processing failed")
 
         db.refresh(scan)
 
-        safe_result = make_json_safe(decode_db_result(scan.result))
-        report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
-        return {"id": scan.id, "status": scan.status.value, "result": safe_result, "report_url": report_url}
+        result = make_json_safe(decode_db_result(scan.result))
+        report_url = f"/scan/{scan.id}/report?token=" + create_token(user_id)
 
-    # Normal mode: async worker
+        return {
+            "id": scan.id,
+            "status": scan.status.value,
+            "result": result,
+            "report_url": report_url,
+        }
+
     process_scan.delay(scan.id)
     return {"id": scan.id, "status": scan.status.value, "result": None, "report_url": None}
 
 
 @app.get("/scan/{scan_id}", response_model=ScanResponse)
-def get_scan(scan_id: int, db: Session = Depends(get_db), user_id: int = Depends(require_user)):
+def get_scan(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    user_id: int = Depends(require_user),
+):
     scan = db.get(Scan, scan_id)
     if not scan or scan.user_id != user_id:
         raise HTTPException(404, "Not found")
 
-    safe_result = make_json_safe(decode_db_result(scan.result))
-    report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
-    return {"id": scan.id, "status": scan.status.value, "result": safe_result, "report_url": report_url}
+    result = make_json_safe(decode_db_result(scan.result))
+    report_url = f"/scan/{scan.id}/report?token=" + create_token(user_id) if scan.report_path else None
 
+    return {
+        "id": scan.id,
+        "status": scan.status.value,
+        "result": result,
+        "report_url": report_url,
+    }
+
+
+# ==========================================================
+# PDF REPORT (BROWSER SAFE)
+# ==========================================================
 
 @app.get("/scan/{scan_id}/report")
 def get_report(
     scan_id: int,
-    token: str = Query("", description="JWT token for browser downloads"),
-    authorization: str = Header(None),
+    token: str = Query("", description="JWT token"),
+    authorization: str = Depends(lambda: None),
     db: Session = Depends(get_db),
 ):
-    # 1) Try header auth (API usage)
     user_id = None
-    if authorization and authorization.startswith("Bearer "):
-        try:
-            user_id = require_user(authorization)
-        except Exception:
-            user_id = None
 
-    # 2) Try token in URL (browser usage)
-    if user_id is None:
-        if not token:
-            raise HTTPException(401, "Missing token")
+    if token:
         user_id = decode_token(token)
-        if user_id is None:
-            raise HTTPException(401, "Invalid token")
+    elif authorization:
+        user_id = require_user(authorization)
+
+    if not user_id:
+        raise HTTPException(401, "Missing token")
 
     scan = db.get(Scan, scan_id)
-    if not scan or scan.user_id != int(user_id) or not scan.report_path:
+    if not scan or scan.user_id != user_id or not scan.report_path:
         raise HTTPException(404, "Not found")
 
+    from fastapi.responses import FileResponse
     return FileResponse(
         scan.report_path,
         media_type="application/pdf",
