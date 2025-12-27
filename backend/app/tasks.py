@@ -14,12 +14,10 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
 )
 
-# Important for Celery 6+ warning
 celery_app.conf.broker_connection_retry_on_startup = True
 
 
 def _json_safe(obj):
-    # minimal safe conversion (no numpy/torch objects)
     try:
         import numpy as np
         if isinstance(obj, (np.floating,)):
@@ -54,27 +52,28 @@ def process_scan(scan_id: int):
     try:
         scan = db.get(Scan, scan_id)
         if not scan:
+            print(f"[process_scan] scan {scan_id} not found")
             return
 
-        # run inference
-        result = run_inference(scan.image_path, scan.eye)
+        print(f"[process_scan] scan={scan.id} eye={scan.eye} path={scan.image_path}")
 
-        # make sure result is JSON-friendly
+        result = run_inference(scan.image_path, scan.eye)
         result = _json_safe(result)
 
-        # ✅ Store result as JSON string (fixes Postgres dict-adaptation error)
         scan.result = json.dumps(result, ensure_ascii=False)
-
-        # generate report
         report_path = create_pdf_report(scan_id=scan.id, result=result)
         scan.report_path = report_path
-
         scan.status = ScanStatus.done
+
         db.add(scan)
         db.commit()
 
+        print(f"[process_scan] scan={scan.id} committed OK status={scan.status}")
+
     except Exception as e:
-        # mark failed
+        # THIS print will show the real SQLAlchemy/psycopg error in Render logs
+        print(f"[process_scan] ERROR {type(e).__name__}: {str(e)}")
+
         try:
             scan = db.get(Scan, scan_id)
             if scan:
@@ -82,8 +81,9 @@ def process_scan(scan_id: int):
                 scan.result = json.dumps({"error": f"{type(e).__name__}: {str(e)}"}, ensure_ascii=False)
                 db.add(scan)
                 db.commit()
-        except Exception:
-            pass
+        except Exception as e2:
+            print(f"[process_scan] FAILED to mark failed: {type(e2).__name__}: {str(e2)}")
+
         raise
     finally:
         db.close()
