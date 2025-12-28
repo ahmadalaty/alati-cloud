@@ -10,12 +10,12 @@ from PIL import Image
 BASE_DIR = os.path.dirname(__file__)
 MODEL_DIR = os.path.join(BASE_DIR, "model_files")
 
-with open(os.path.join(MODEL_DIR, "labels.json"), "r", encoding="utf-8") as f:
+LABELS_PATH = os.path.join(MODEL_DIR, "labels.json")
+with open(LABELS_PATH, "r", encoding="utf-8") as f:
     LABELS = json.load(f)
 
 NUM_CLASSES = len(LABELS)
 
-# Default model variant (you can switch later via env)
 DEFAULT_VARIANT = os.getenv("MODEL_VARIANT", "resnet18").strip().lower()
 
 
@@ -24,40 +24,46 @@ DEFAULT_VARIANT = os.getenv("MODEL_VARIANT", "resnet18").strip().lower()
 # -------------------------
 def _clean_state_dict(state: dict) -> dict:
     """
-    Your checkpoint uses keys like 'backbone.conv1.weight' (and sometimes 'module.backbone...')
-    We convert them into torchvision ResNet keys ('conv1.weight').
+    Converts keys like:
+      'module.backbone.conv1.weight' -> 'conv1.weight'
+      'backbone.layer1.0...' -> 'layer1.0...'
     """
     cleaned = {}
     for k, v in state.items():
         nk = k
 
-        # common wrappers
         if nk.startswith("module."):
-            nk = nk[len("module."):]
+            nk = nk[len("module.") :]
 
         if nk.startswith("backbone."):
-            nk = nk[len("backbone."):]
+            nk = nk[len("backbone.") :]
 
-        # if you used 'model.' wrapper sometimes
         if nk.startswith("model."):
-            nk = nk[len("model."):]
+            nk = nk[len("model.") :]
 
         cleaned[nk] = v
     return cleaned
 
 
-def _load_checkpoint(path: str):
-    ckpt = torch.load(path, map_location="cpu")
-
-    # if saved as {"state_dict": ...}
-    if isinstance(ckpt, dict) and "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
-        ckpt = ckpt["state_dict"]
-
-    return ckpt
+def _extract_state_dict(ckpt):
+    """
+    Handles:
+    - state_dict directly (dict of tensors)
+    - dict containing "state_dict"
+    - other common wrappers
+    """
+    if isinstance(ckpt, dict):
+        if "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
+            return ckpt["state_dict"]
+        if "model_state_dict" in ckpt and isinstance(ckpt["model_state_dict"], dict):
+            return ckpt["model_state_dict"]
+        # sometimes it's already a state dict
+        return ckpt
+    return None
 
 
 # -------------------------
-# Model building/loading
+# Model loading
 # -------------------------
 def load_model(model_variant: str):
     model_variant = (model_variant or "resnet18").strip().lower()
@@ -72,24 +78,27 @@ def load_model(model_variant: str):
         weights_path = os.path.join(MODEL_DIR, "alati_dualeye_model_resnet18.pth")
         model_variant = "resnet18"
 
-    # force FC to match our labels count
+    # set classifier head
     model.fc = torch.nn.Linear(model.fc.in_features, NUM_CLASSES)
 
-    ckpt = _load_checkpoint(weights_path)
+    ckpt = torch.load(weights_path, map_location="cpu")
 
-    # Case A: checkpoint is a full model object
+    # if someone saved full model object
     if not isinstance(ckpt, dict):
         ckpt.eval()
         return ckpt, model_variant
 
-    # Case B: checkpoint is a state_dict
-    state = _clean_state_dict(ckpt)
+    state = _extract_state_dict(ckpt)
+    if state is None:
+        raise RuntimeError("Checkpoint format not understood (no state_dict found)")
 
-    # load strictly (should match after cleaning). If you changed heads, we allow non-strict for fc.
+    state = _clean_state_dict(state)
+
+    # first try strict
     try:
         model.load_state_dict(state, strict=True)
     except RuntimeError:
-        # allow head mismatch only (fc.*)
+        # allow only head mismatches
         model.load_state_dict(state, strict=False)
 
     model.eval()
@@ -100,7 +109,7 @@ MODEL, ACTIVE_VARIANT = load_model(DEFAULT_VARIANT)
 
 
 # -------------------------
-# Preprocessing (standard ImageNet)
+# Preprocessing
 # -------------------------
 TRANSFORM = T.Compose([
     T.Resize((224, 224)),
@@ -114,10 +123,6 @@ TRANSFORM = T.Compose([
 # Inference
 # -------------------------
 def run_inference(image_path: str, eye: str):
-    """
-    image_path: image file path
-    eye: 'left' or 'right' (kept for future eye-specific pipelines)
-    """
     eye = (eye or "left").strip().lower()
     if eye not in ("left", "right"):
         eye = "left"
@@ -132,7 +137,6 @@ def run_inference(image_path: str, eye: str):
     probs_dict = {LABELS[i]: float(probs[i].item()) for i in range(NUM_CLASSES)}
     top_label = max(probs_dict, key=probs_dict.get)
     top_prob = probs_dict[top_label]
-
     triage = "Refer" if top_prob >= 0.5 else "Routine"
 
     return {
