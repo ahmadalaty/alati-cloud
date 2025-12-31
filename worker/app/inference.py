@@ -1,8 +1,20 @@
-import json
+# /worker/app/inference.py
 import os
+import json
+from io import BytesIO
+from typing import Dict, Tuple
+
 import torch
 import torchvision.transforms as T
 from PIL import Image
+
+# IMPORTANT: this must match your storage.py helper
+# (your worker must have the same storage.py as backend)
+from .storage import load_bytes_from_ref
+from .config import settings
+
+# Build marker so you can prove the worker updated
+BUILD_MARKER = "WORKER_INFERENCE_R2_BYTES_v1_2026_01_01"
 
 # -------------------------
 # Paths / labels
@@ -17,6 +29,7 @@ with open(LABELS_PATH, "r", encoding="utf-8") as f:
 NUM_CLASSES = len(LABELS)
 
 DEFAULT_VARIANT = os.getenv("MODEL_VARIANT", "resnet18").strip().lower()
+TRIAGE_THRESHOLD = float(os.getenv("TRIAGE_THRESHOLD", "0.5"))
 
 
 # -------------------------
@@ -27,20 +40,17 @@ def _clean_state_dict(state: dict) -> dict:
     Converts keys like:
       'module.backbone.conv1.weight' -> 'conv1.weight'
       'backbone.layer1.0...' -> 'layer1.0...'
+      'model.layer1.0...' -> 'layer1.0...'
     """
     cleaned = {}
     for k, v in state.items():
         nk = k
-
         if nk.startswith("module."):
             nk = nk[len("module.") :]
-
         if nk.startswith("backbone."):
             nk = nk[len("backbone.") :]
-
         if nk.startswith("model."):
             nk = nk[len("model.") :]
-
         cleaned[nk] = v
     return cleaned
 
@@ -48,17 +58,15 @@ def _clean_state_dict(state: dict) -> dict:
 def _extract_state_dict(ckpt):
     """
     Handles:
-    - state_dict directly (dict of tensors)
-    - dict containing "state_dict"
-    - other common wrappers
+    - state_dict directly (dict of tensors / OrderedDict)
+    - dict containing "state_dict" or "model_state_dict"
     """
     if isinstance(ckpt, dict):
         if "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
             return ckpt["state_dict"]
         if "model_state_dict" in ckpt and isinstance(ckpt["model_state_dict"], dict):
             return ckpt["model_state_dict"]
-        # sometimes it's already a state dict
-        return ckpt
+        return ckpt  # already state dict / OrderedDict
     return None
 
 
@@ -72,21 +80,22 @@ def load_model(model_variant: str):
         from torchvision.models import resnet50
         model = resnet50(weights=None)
         weights_path = os.path.join(MODEL_DIR, "alati_dualeye_model_resnet50.pth")
+        active_variant = "resnet50"
     else:
         from torchvision.models import resnet18
         model = resnet18(weights=None)
         weights_path = os.path.join(MODEL_DIR, "alati_dualeye_model_resnet18.pth")
-        model_variant = "resnet18"
+        active_variant = "resnet18"
 
     # set classifier head
     model.fc = torch.nn.Linear(model.fc.in_features, NUM_CLASSES)
 
     ckpt = torch.load(weights_path, map_location="cpu")
 
-    # if someone saved full model object
+    # if someone saved full model object (rare)
     if not isinstance(ckpt, dict):
         ckpt.eval()
-        return ckpt, model_variant
+        return ckpt, active_variant
 
     state = _extract_state_dict(ckpt)
     if state is None:
@@ -94,15 +103,15 @@ def load_model(model_variant: str):
 
     state = _clean_state_dict(state)
 
-    # first try strict
+    # strict first
     try:
         model.load_state_dict(state, strict=True)
     except RuntimeError:
-        # allow only head mismatches
+        # allow partial (head mismatch, etc.)
         model.load_state_dict(state, strict=False)
 
     model.eval()
-    return model, model_variant
+    return model, active_variant
 
 
 MODEL, ACTIVE_VARIANT = load_model(DEFAULT_VARIANT)
@@ -119,15 +128,47 @@ TRANSFORM = T.Compose([
 ])
 
 
-# -------------------------
-# Inference
-# -------------------------
-def run_inference(image_path: str, eye: str):
-    eye = (eye or "left").strip().lower()
-    if eye not in ("left", "right"):
-        eye = "left"
+def _normalize_eye(eye: str) -> str:
+    e = (eye or "").strip().lower()
+    if e in ("l", "left"):
+        return "left"
+    if e in ("r", "right"):
+        return "right"
+    return "left"
 
-    img = Image.open(image_path).convert("RGB")
+
+def _infer_storage_mode_from_ref(ref: str) -> str:
+    """
+    If STORAGE_MODE=r2, always treat ref as an R2 key.
+    Otherwise treat it as local path.
+    """
+    mode = (settings.STORAGE_MODE or "local").strip().lower()
+    if mode == "r2":
+        return "r2"
+    return "local"
+
+
+# -------------------------
+# Inference (R2-first)
+# -------------------------
+def run_inference(image_ref: str, eye: str):
+    """
+    image_ref:
+      - if STORAGE_MODE=r2: the R2 key e.g. "uploads/<uuid>.jpg"
+      - else: local file path
+
+    Returns dict safe for JSON
+    """
+    eye = _normalize_eye(eye)
+
+    mode = _infer_storage_mode_from_ref(image_ref)
+
+    # Load bytes from R2 or local
+    img_bytes = load_bytes_from_ref(mode, image_ref)
+
+    # Open as PIL image from bytes
+    img = Image.open(BytesIO(img_bytes)).convert("RGB")
+
     x = TRANSFORM(img).unsqueeze(0)
 
     with torch.no_grad():
@@ -136,8 +177,8 @@ def run_inference(image_path: str, eye: str):
 
     probs_dict = {LABELS[i]: float(probs[i].item()) for i in range(NUM_CLASSES)}
     top_label = max(probs_dict, key=probs_dict.get)
-    top_prob = probs_dict[top_label]
-    triage = "Refer" if top_prob >= 0.5 else "Routine"
+    top_prob = float(probs_dict[top_label])
+    triage = "Refer" if top_prob >= TRIAGE_THRESHOLD else "Routine"
 
     return {
         "model_variant": ACTIVE_VARIANT,
