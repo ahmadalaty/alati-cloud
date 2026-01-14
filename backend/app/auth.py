@@ -1,39 +1,70 @@
-from datetime import datetime, timedelta
+import os
+import time
+from typing import Optional
+
+from fastapi import Depends, HTTPException, Request
 from jose import jwt, JWTError
 from passlib.context import CryptContext
-from fastapi import HTTPException, Depends
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-bearer = HTTPBearer(auto_error=False)
+# PBKDF2 has no bcrypt 72-byte password limit.
+pwd_context = CryptContext(
+    schemes=["pbkdf2_sha256"],
+    deprecated="auto",
+)
+
+TOKEN_TTL_SECONDS = 60 * 60 * 24  # 24h
 
 
-def hash_password(p: str) -> str:
-    return pwd_context.hash(p)
+def hash_password(password: str) -> str:
+    password = (password or "").strip()
+    if not password:
+        raise ValueError("Password is empty")
+    return pwd_context.hash(password)
 
 
-def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        return pwd_context.verify(password or "", password_hash or "")
+    except Exception:
+        return False
 
 
 def create_token(user_id: int) -> str:
-    exp = datetime.utcnow() + timedelta(minutes=settings.JWT_EXPIRE_MINUTES)
-    payload = {"sub": str(user_id), "exp": exp}
-    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALG)
+    now = int(time.time())
+    payload = {
+        "sub": str(user_id),
+        "iat": now,
+        "exp": now + TOKEN_TTL_SECONDS,
+    }
+    return jwt.encode(payload, settings.JWT_SECRET, algorithm="HS256")
 
 
-def require_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> int:
-    if creds is None or not creds.credentials:
+def _extract_token(req: Request) -> Optional[str]:
+    # Authorization: Bearer <token>
+    auth = req.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+
+    # fallback (optional): ?token=...
+    token = req.query_params.get("token")
+    if token:
+        return token.strip()
+
+    return None
+
+
+def require_user(req: Request) -> int:
+    token = _extract_token(req)
+    if not token:
         raise HTTPException(status_code=401, detail="Missing token")
 
-    token = creds.credentials
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALG])
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
         sub = payload.get("sub")
         if not sub:
-            raise HTTPException(401, "Invalid token")
+            raise HTTPException(status_code=401, detail="Invalid token")
         return int(sub)
-    except JWTError:
+    except (JWTError, ValueError):
         raise HTTPException(status_code=401, detail="Invalid token")
