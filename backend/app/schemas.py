@@ -1,18 +1,20 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Optional
+
 
 class LoginRequest(BaseModel):
     email: str
     password: str
 
+
 class TokenResponse(BaseModel):
     access_token: str
 
-class ScanCreateRequest(BaseModel):
-    upload_id: str
-    eye: str  # "OD" or "OS"
 
-class ScanResponse(BaseModel):
+class ScanResult(BaseModel):
     id: int
+    eye_mode: str
+    left_diagnosis: Optional[str] = None
+    right_diagnosis: Optional[str] = None
     status: str
-    result: dict | None = None
-    report_url: str | None = None
+    error: Optional[str] = None

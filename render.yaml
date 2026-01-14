@@ -11,59 +11,26 @@ services:
         fromDatabase:
           name: alati-db
           property: connectionString
-      - key: REDIS_URL
-        fromService:
-          name: alati-redis
-          type: redis
-          property: connectionString
       - key: JWT_SECRET
         generateValue: true
+
+      # Force R2 only
       - key: STORAGE_MODE
-        value: local
-      - key: LOCAL_STORAGE_DIR
-        value: /data
+        value: r2
+
+      # R2 env vars (set these in Render env too)
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+
+      # Model selection
       - key: MODEL_VARIANT
         value: resnet18
-      - key: TRIAGE_THRESHOLD
-        value: "0.6"
-
-  - type: worker
-    name: alati-worker
-    env: docker
-    rootDir: worker
-    dockerfilePath: Dockerfile
-    plan: starter
-    autoDeploy: true
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: alati-db
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          name: alati-redis
-          type: redis
-          property: connectionString
-      - key: JWT_SECRET
-        fromService:
-          name: alati-api
-          type: web
-          envVarKey: JWT_SECRET
-      - key: STORAGE_MODE
-        value: local
-      - key: LOCAL_STORAGE_DIR
-        value: /data
-      - key: MODEL_VARIANT
-        value: resnet18
-      - key: TRIAGE_THRESHOLD
-        value: "0.6"
-
-  - type: redis
-    name: alati-redis
-    plan: starter
-    ipAllowList:
-      - source: 0.0.0.0/0
-        description: allow render internal services
 
 databases:
   - name: alati-db

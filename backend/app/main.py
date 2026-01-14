@@ -1,469 +1,246 @@
 import os
-import json
-import time
-from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
 
+from .config import settings
 from .db import Base, engine, get_db, SessionLocal
-from .models import User, Scan, ScanStatus
-from .schemas import LoginRequest, TokenResponse, ScanCreateRequest, ScanResponse
+from .models import User, Scan
+from .schemas import LoginRequest, TokenResponse, ScanResult
 from .auth import hash_password, verify_password, create_token, require_user
-from .storage import new_upload_id, save_upload, upload_target_path
-from .tasks import process_scan
+from .storage_r2 import new_upload_id, key_for, put_bytes, BUILD_MARKER as STORAGE_MARKER
+from .inference import predict_diagnosis, BUILD_MARKER as INF_MARKER, ACTIVE_VARIANT
 
-app = FastAPI(title="Alati Cloud API")
+
+app = FastAPI(title="Alati Cloud Demo (No Worker)")
 Base.metadata.create_all(bind=engine)
 
 
-# ----------------------------
-# Helpers
-# ----------------------------
-
-def make_json_safe(obj):
-    if obj is None or isinstance(obj, (str, int, float, bool)):
-        return obj
-    if isinstance(obj, dict):
-        return {str(k): make_json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple, set)):
-        return [make_json_safe(x) for x in obj]
-    try:
-        import numpy as np
-        if isinstance(obj, (np.integer,)):
-            return int(obj)
-        if isinstance(obj, (np.floating,)):
-            return float(obj)
-        if isinstance(obj, (np.ndarray,)):
-            return make_json_safe(obj.tolist())
-    except Exception:
-        pass
-    try:
-        import torch
-        if isinstance(obj, torch.Tensor):
-            if obj.numel() == 1:
-                return float(obj.detach().cpu().item())
-            return make_json_safe(obj.detach().cpu().tolist())
-    except Exception:
-        pass
-    return str(obj)
-
-
-def decode_db_result(val):
-    # result might be json string OR dict OR null
-    if val is None:
-        return None
-    if isinstance(val, dict):
-        return val
-    if isinstance(val, str):
-        try:
-            return json.loads(val)
-        except Exception:
-            return {"raw": val}
-    return {"raw": str(val)}
-
-
-def _upsert_user(db: Session, email: str, password: str, make_admin: bool = False):
-    email = (email or "").strip().lower()
-    password = (password or "").strip()
-    if not email or not password:
-        return
-
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        user = User(email=email, password_hash=hash_password(password))
-        if make_admin and hasattr(user, "is_admin"):
-            user.is_admin = True
-        db.add(user)
-        db.commit()
-        return
-
-    user.password_hash = hash_password(password)
-    if make_admin and hasattr(user, "is_admin"):
-        user.is_admin = True
-    db.add(user)
-    db.commit()
-
-
-# ----------------------------
-# Startup seed
-# ----------------------------
-@app.on_event("startup")
-def seed():
+def upsert_admin():
     db = SessionLocal()
     try:
-        # default demo admin
-        _upsert_user(db, "admin@alati.ai", "admin123", make_admin=True)
+        email = (settings.OWNER_EMAIL or "").strip().lower()
+        password = (settings.OWNER_PASSWORD or "").strip()
+        if not email or not password:
+            return
 
-        # owner account from env
-        owner_email = os.getenv("OWNER_EMAIL", "").strip()
-        owner_password = os.getenv("OWNER_PASSWORD", "").strip()
-        if owner_email and owner_password:
-            _upsert_user(db, owner_email, owner_password, make_admin=True)
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            user = User(email=email, password_hash=hash_password(password))
+            db.add(user)
+            db.commit()
+        else:
+            user.password_hash = hash_password(password)
+            db.add(user)
+            db.commit()
     finally:
         db.close()
 
 
-# ----------------------------
-# Health / Debug
-# ----------------------------
+@app.on_event("startup")
+def startup():
+    upsert_admin()
+
+
 @app.get("/health")
 def health():
     return {"ok": True}
 
 
 @app.get("/debug")
-def debug_info():
-    demo_mode = os.getenv("DEMO_MODE", "").strip()
-    debug_errors = os.getenv("DEBUG_ERRORS", "").strip()
-
-    torch_ok = True
-    torch_version = None
-    torch_error = None
-    try:
-        import torch
-        torch_version = getattr(torch, "__version__", None)
-    except Exception as e:
-        torch_ok = False
-        torch_error = f"{type(e).__name__}: {str(e)}"
-
-    base_dir = os.path.dirname(__file__)
-    model_dir = os.path.join(base_dir, "model_files")
-    res18 = os.path.join(model_dir, "alati_dualeye_model_resnet18.pth")
-    res50 = os.path.join(model_dir, "alati_dualeye_model_resnet50.pth")
-    labels = os.path.join(model_dir, "labels.json")
-
+def debug():
     return {
-        "demo_mode": demo_mode,
-        "debug_errors": debug_errors,
-        "torch_ok": torch_ok,
-        "torch_version": torch_version,
-        "torch_error": torch_error,
-        "model_dir": model_dir,
-        "resnet18_exists": os.path.exists(res18),
-        "resnet50_exists": os.path.exists(res50),
-        "labels_exists": os.path.exists(labels),
+        "storage_mode": settings.STORAGE_MODE,
+        "model_variant": ACTIVE_VARIANT,
+        "storage_marker": STORAGE_MARKER,
+        "inference_marker": INF_MARKER,
+        "r2_bucket_set": bool(settings.R2_BUCKET),
+        "demo_mode": settings.DEMO_MODE,
     }
 
 
-# ----------------------------
-# UI
-# ----------------------------
 @app.get("/", response_class=HTMLResponse)
-def presentation_ui():
+def ui():
+    # Clean single-page UI:
+    # - login section
+    # - scan section after login
     return """
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Alati Cloud</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Alati Demo</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #0b1020; color: #e8ecff; }
-    .wrap { max-width: 860px; margin: 0 auto; padding: 28px 16px 48px; }
-    .top { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; }
-    h1 { font-size: 30px; margin: 0; letter-spacing: 0.2px; }
-    .sub { opacity: 0.85; margin: 6px 0 0; }
-    .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 18px; padding: 16px; margin: 14px 0; }
-    label { display:block; font-size: 13px; opacity: 0.85; margin: 10px 0 6px; }
-    input, select, button { width: 100%; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.25); color: #e8ecff; font-size: 15px; }
-    button { cursor: pointer; background: #355dff; border: 0; font-weight: 800; }
-    button:disabled { opacity: 0.6; cursor: not-allowed; }
-    .row { display:flex; gap: 12px; }
-    .row > div { flex: 1; }
-    .muted { opacity: 0.8; font-size: 13px; }
-    .ok { color: #67ffb1; font-weight: 800; }
-    .bad { color: #ff8a8a; font-weight: 800; }
-    .grid { display:grid; grid-template-columns: 1.2fr 0.8fr; gap: 12px; }
-    @media (max-width: 860px){ .grid { grid-template-columns: 1fr; } }
-
-    .pill { display:inline-flex; align-items:center; gap:8px; padding: 8px 10px; border-radius: 999px;
-            background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); font-size: 13px; }
-    .pill strong { font-weight: 900; }
-    .triage { font-size: 14px; font-weight: 900; padding: 8px 10px; border-radius: 12px; display:inline-block; }
-    .triage.refer { background: rgba(255, 66, 66, 0.18); border: 1px solid rgba(255, 66, 66, 0.35); }
-    .triage.routine { background: rgba(103, 255, 177, 0.14); border: 1px solid rgba(103, 255, 177, 0.30); }
-
-    .resultCard { background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.12); border-radius: 16px; padding: 14px; }
-    .bar { height: 10px; border-radius: 999px; background: rgba(255,255,255,0.10); overflow:hidden; border: 1px solid rgba(255,255,255,0.10); }
-    .bar > div { height: 100%; background: rgba(53,93,255,0.9); width: 0%; transition: width 250ms ease; }
-    .probRow { display:flex; align-items:center; justify-content:space-between; gap:12px; margin: 10px 0; }
-    .probName { font-weight: 700; }
-    .probVal { font-variant-numeric: tabular-nums; opacity: 0.9; }
-    .small { font-size: 12px; opacity: 0.8; }
-    a { color: #9fb3ff; }
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#0b1020;color:#e8ecff;}
+    .wrap{max-width:760px;margin:0 auto;padding:28px 16px 48px;}
+    .card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:16px;margin:14px 0;}
+    h1{font-size:28px;margin:0 0 6px;}
+    .sub{opacity:.85;margin:0 0 18px;}
+    label{display:block;font-size:13px;opacity:.85;margin:10px 0 6px;}
+    input,select,button{width:100%;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.25);color:#e8ecff;font-size:15px;}
+    button{cursor:pointer;background:#355dff;border:0;font-weight:700;}
+    button:disabled{opacity:.6;cursor:not-allowed;}
+    .row{display:flex;gap:12px;align-items:flex-end;}
+    .row>div{flex:1;}
+    .muted{opacity:.8;font-size:13px;}
+    .ok{color:#67ffb1;font-weight:700;}
+    .bad{color:#ff8a8a;font-weight:700;}
+    .result{padding:14px;border-radius:14px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.12);margin-top:10px;}
+    .big{font-size:18px;font-weight:800;}
+    a{color:#9fb3ff;}
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="top">
-      <div>
-        <h1>Alati Cloud</h1>
-        <div class="sub">Fundus AI demo: login → upload → analyze → results (no PDF needed).</div>
-      </div>
-      <div class="pill"><strong>Mode:</strong> Cloud</div>
+<div class="wrap">
+  <h1>Alati Cloud Demo</h1>
+  <p class="sub">Login → choose eye → take photo / upload → diagnosis only.</p>
+
+  <div class="card" id="loginCard">
+    <h3 style="margin:0 0 8px;">1) Login</h3>
+    <label>Email</label>
+    <input id="email" placeholder="admin@alati.ai"/>
+    <label>Password</label>
+    <input id="password" type="password" placeholder="••••••••"/>
+    <div style="height:10px"></div>
+    <button id="btnLogin" onclick="doLogin()">Login</button>
+    <p id="loginStatus" class="muted"></p>
+    <p class="muted">Debug: <a href="/debug" target="_blank">/debug</a></p>
+  </div>
+
+  <div class="card" id="scanCard" style="display:none;">
+    <h3 style="margin:0 0 8px;">2) Scan</h3>
+
+    <label>Eye mode</label>
+    <select id="eyeMode" onchange="refreshInputs()">
+      <option value="left">Left eye</option>
+      <option value="right">Right eye</option>
+      <option value="both">Both eyes</option>
+    </select>
+
+    <div id="singleBox">
+      <label>Image (upload or camera)</label>
+      <input id="singleFile" type="file" accept="image/*" capture="environment"/>
+      <p class="muted">On mobile: this opens camera. On desktop: file picker.</p>
     </div>
 
-    <div class="grid">
-      <div class="card">
-        <h3 style="margin:0 0 10px;">1) Login</h3>
-        <label>Email</label>
-        <input id="email" placeholder="ahmadalaty@gmail.com" />
-        <label>Password</label>
-        <input id="password" type="password" placeholder="••••••••" />
-        <div style="height:10px"></div>
-        <button id="btnLogin" onclick="doLogin()">Login</button>
-        <p id="loginStatus" class="muted"></p>
-      </div>
-
-      <div class="card">
-        <h3 style="margin:0 0 10px;">2) Upload</h3>
-
-        <label>Workflow</label>
-        <select id="mode">
-          <option value="single">Single eye</option>
-          <option value="both">Both eyes (Left + Right)</option>
-        </select>
-
-        <div id="singleBlock">
-          <label>Eye</label>
-          <select id="eyeSingle">
-            <option value="left">Left</option>
-            <option value="right">Right</option>
-          </select>
-
-          <label>Fundus image</label>
-          <input id="fileSingle" type="file" accept="image/*" />
-        </div>
-
-        <div id="bothBlock" style="display:none;">
+    <div id="bothBox" style="display:none;">
+      <div class="row">
+        <div>
           <label>Left image</label>
-          <input id="fileLeft" type="file" accept="image/*" />
-          <label>Right image</label>
-          <input id="fileRight" type="file" accept="image/*" />
+          <input id="leftFile" type="file" accept="image/*" capture="environment"/>
         </div>
-
-        <div style="height:12px"></div>
-        <button id="btnAnalyze" onclick="doAnalyze()" disabled>Analyze</button>
-
-        <p class="muted" style="margin-top:10px;">
-          Debug: <a href="/debug" target="_blank">/debug</a> • Docs: <a href="/docs" target="_blank">/docs</a>
-        </p>
+        <div>
+          <label>Right image</label>
+          <input id="rightFile" type="file" accept="image/*" capture="environment"/>
+        </div>
       </div>
     </div>
 
-    <div class="card">
-      <h3 style="margin:0 0 10px;">3) Results</h3>
-      <p id="resultStatus" class="muted">Waiting…</p>
-      <div id="resultsContainer" style="display:grid; gap: 12px;"></div>
-      <p class="small">Tip: For best demo results, use clear centered fundus images with minimal glare.</p>
+    <div style="height:10px"></div>
+    <button id="btnRun" onclick="runScan()">Analyze</button>
+    <p id="scanStatus" class="muted"></p>
+
+    <div class="result" id="resultBox" style="display:none;">
+      <div class="big" id="diagTitle">Diagnosis</div>
+      <div id="diagText" style="margin-top:8px;"></div>
     </div>
   </div>
+
+</div>
 
 <script>
 let TOKEN = null;
 
-document.getElementById("mode").addEventListener("change", () => {
-  const m = document.getElementById("mode").value;
-  document.getElementById("singleBlock").style.display = (m === "single") ? "block" : "none";
-  document.getElementById("bothBlock").style.display = (m === "both") ? "block" : "none";
-});
-
-function setStatus(el, msg, ok=null) {
+function setStatus(id, msg, ok=null){
+  const el = document.getElementById(id);
   el.textContent = msg;
-  if (ok === true) el.className = "muted ok";
-  else if (ok === false) el.className = "muted bad";
-  else el.className = "muted";
+  if(ok===true) el.className="muted ok";
+  else if(ok===false) el.className="muted bad";
+  else el.className="muted";
 }
 
-function labelNice(s) {
-  if (!s) return "";
-  return s.replaceAll("_"," ").replace(/\b\w/g, c => c.toUpperCase());
+function refreshInputs(){
+  const mode = document.getElementById("eyeMode").value;
+  document.getElementById("singleBox").style.display = (mode==="both") ? "none" : "block";
+  document.getElementById("bothBox").style.display = (mode==="both") ? "block" : "none";
 }
 
-function triageClass(t) {
-  return (String(t||"").toLowerCase() === "refer") ? "refer" : "routine";
-}
-
-function fmtPct(x) {
-  const v = Number(x);
-  if (!isFinite(v)) return "-";
-  return (v*100).toFixed(1) + "%";
-}
-
-function renderResultCard(title, data) {
-  // data shape:
-  // { model_variant, eye, probs, top_label, top_prob, triage }
-  const probs = data && data.probs ? data.probs : {};
-  const entries = Object.entries(probs).sort((a,b)=> (Number(b[1]) - Number(a[1])));
-
-  let html = `
-    <div class="resultCard">
-      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
-        <div class="pill"><strong>${title}</strong></div>
-        <div class="pill"><strong>Model:</strong> ${data.model_variant || "-"}</div>
-        <div class="pill"><strong>Top:</strong> ${labelNice(data.top_label)} (${fmtPct(data.top_prob)})</div>
-        <div class="triage ${triageClass(data.triage)}">${data.triage || "—"}</div>
-      </div>
-      <div style="height:10px"></div>
-  `;
-
-  for (const [k,v] of entries) {
-    const pct = Math.max(0, Math.min(100, Number(v)*100));
-    html += `
-      <div class="probRow">
-        <div class="probName">${labelNice(k)}</div>
-        <div class="probVal">${fmtPct(v)}</div>
-      </div>
-      <div class="bar"><div style="width:${pct}%;"></div></div>
-    `;
-  }
-
-  html += `</div>`;
-  return html;
-}
-
-async function doLogin() {
+async function doLogin(){
+  setStatus("loginStatus","Logging in…");
   const email = document.getElementById("email").value.trim();
   const password = document.getElementById("password").value;
-  const st = document.getElementById("loginStatus");
-  setStatus(st, "Logging in…");
 
-  try {
-    const r = await fetch("/auth/login", {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({email, password})
+  try{
+    const r = await fetch("/auth/login",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({email,password})
     });
     const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || "Login failed");
+    if(!r.ok) throw new Error(data.detail || "Login failed");
     TOKEN = data.access_token;
-    setStatus(st, "Login OK ✅", true);
-    document.getElementById("btnAnalyze").disabled = false;
-  } catch (e) {
+
+    setStatus("loginStatus","Login OK ✅",true);
+    document.getElementById("scanCard").style.display="block";
+  }catch(e){
     TOKEN = null;
-    document.getElementById("btnAnalyze").disabled = true;
-    setStatus(st, "Login failed: " + e.message, false);
+    setStatus("loginStatus","Login failed: "+e.message,false);
   }
 }
 
-async function uploadOne(fileObj) {
-  const form = new FormData();
-  form.append("file", fileObj);
+async function runScan(){
+  if(!TOKEN){ setStatus("scanStatus","Please login first.",false); return; }
 
-  const up = await fetch("/upload", {
-    method: "POST",
-    headers: { "Authorization": "Bearer " + TOKEN },
-    body: form
-  });
+  const mode = document.getElementById("eyeMode").value;
+  const fd = new FormData();
+  fd.append("eye_mode", mode);
 
-  const upText = await up.text();
-  let upData;
-  try { upData = JSON.parse(upText); } catch(e) { throw new Error(upText); }
-  if (!up.ok) throw new Error(upData.detail || "Upload failed");
-  return upData.upload_id;
-}
+  if(mode==="both"){
+    const lf = document.getElementById("leftFile").files?.[0];
+    const rf = document.getElementById("rightFile").files?.[0];
+    if(!lf || !rf){ setStatus("scanStatus","Please select both images.",false); return; }
+    fd.append("left_file", lf);
+    fd.append("right_file", rf);
+  }else{
+    const f = document.getElementById("singleFile").files?.[0];
+    if(!f){ setStatus("scanStatus","Please select an image.",false); return; }
+    fd.append("file", f);
+  }
 
-async function createScan(upload_id, eye) {
-  const sc = await fetch("/scan/create", {
-    method: "POST",
-    headers: {
-      "Content-Type":"application/json",
-      "Authorization":"Bearer " + TOKEN
-    },
-    body: JSON.stringify({ upload_id, eye })
-  });
+  setStatus("scanStatus","Analyzing…");
+  document.getElementById("resultBox").style.display="none";
 
-  const scText = await sc.text();
-  let scData;
-  try { scData = JSON.parse(scText); } catch(e) { throw new Error(scText); }
-  if (!sc.ok) throw new Error(scData.detail || "Scan failed");
-  return scData; // {id,status,result,report_url}
-}
-
-async function pollScan(scan_id, timeoutMs=60000, intervalMs=1200) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const r = await fetch(`/scan/${scan_id}`, {
-      headers: { "Authorization": "Bearer " + TOKEN }
+  try{
+    const r = await fetch("/scan/run",{
+      method:"POST",
+      headers:{ "Authorization":"Bearer "+TOKEN },
+      body: fd
     });
-    const t = await r.text();
-    let data;
-    try { data = JSON.parse(t); } catch(e) { throw new Error(t); }
-    if (!r.ok) throw new Error(data.detail || "Failed to fetch scan");
-    if (data.status === "done" || data.status === "failed") return data;
-    await new Promise(res => setTimeout(res, intervalMs));
-  }
-  return { status: "queued", result: null };
-}
+    const data = await r.json();
+    if(!r.ok) throw new Error(data.detail || "Scan failed");
 
-async function doAnalyze() {
-  const rs = document.getElementById("resultStatus");
-  const container = document.getElementById("resultsContainer");
-  container.innerHTML = "";
+    if(data.status !== "done"){
+      setStatus("scanStatus","Failed ❌",false);
+      document.getElementById("diagText").textContent = data.error || "Unknown error";
+    }else{
+      setStatus("scanStatus","Done ✅",true);
 
-  if (!TOKEN) { setStatus(rs, "Please login first.", false); return; }
-
-  const mode = document.getElementById("mode").value;
-
-  try {
-    setStatus(rs, "Uploading image(s)…");
-
-    if (mode === "single") {
-      const eye = document.getElementById("eyeSingle").value;
-      const f = document.getElementById("fileSingle");
-      if (!f.files || !f.files[0]) { setStatus(rs, "Please select an image.", false); return; }
-
-      const upload_id = await uploadOne(f.files[0]);
-      setStatus(rs, "Running AI…");
-
-      const scan = await createScan(upload_id, eye);
-
-      if (scan.status !== "done") {
-        setStatus(rs, "Queued… (waiting for worker)", true);
-        const final = await pollScan(scan.id);
-        if (final.status === "failed") throw new Error(final.result?.error || "AI failed");
-        setStatus(rs, "Done ✅", true);
-        container.innerHTML = renderResultCard(labelNice(eye) + " eye", final.result || {});
-      } else {
-        setStatus(rs, "Done ✅", true);
-        container.innerHTML = renderResultCard(labelNice(eye) + " eye", scan.result || {});
+      let txt = "";
+      if(data.eye_mode === "both"){
+        txt = "Left: " + (data.left_diagnosis || "-") + "\\nRight: " + (data.right_diagnosis || "-");
+      }else if(data.eye_mode === "left"){
+        txt = "Left: " + (data.left_diagnosis || "-");
+      }else{
+        txt = "Right: " + (data.right_diagnosis || "-");
       }
 
-      return;
+      document.getElementById("diagText").textContent = txt;
     }
 
-    // both eyes
-    const fl = document.getElementById("fileLeft");
-    const fr = document.getElementById("fileRight");
-    if (!fl.files || !fl.files[0]) { setStatus(rs, "Please select LEFT image.", false); return; }
-    if (!fr.files || !fr.files[0]) { setStatus(rs, "Please select RIGHT image.", false); return; }
-
-    const left_upload = await uploadOne(fl.files[0]);
-    const right_upload = await uploadOne(fr.files[0]);
-
-    setStatus(rs, "Running AI (Left)…");
-    const left_scan = await createScan(left_upload, "left");
-
-    setStatus(rs, "Running AI (Right)…");
-    const right_scan = await createScan(right_upload, "right");
-
-    // poll both
-    setStatus(rs, "Queued… (waiting for worker)", true);
-
-    const left_final = (left_scan.status === "done") ? left_scan : await pollScan(left_scan.id);
-    const right_final = (right_scan.status === "done") ? right_scan : await pollScan(right_scan.id);
-
-    if (left_final.status === "failed") throw new Error("Left failed: " + (left_final.result?.error || "AI failed"));
-    if (right_final.status === "failed") throw new Error("Right failed: " + (right_final.result?.error || "AI failed"));
-
-    setStatus(rs, "Done ✅", true);
-
-    container.innerHTML =
-      renderResultCard("Left eye", left_final.result || {}) +
-      renderResultCard("Right eye", right_final.result || {});
-
-  } catch (e) {
-    setStatus(rs, "Error: " + e.message, false);
+    document.getElementById("resultBox").style.display="block";
+  }catch(e){
+    setStatus("scanStatus","Error: "+e.message,false);
   }
 }
 </script>
@@ -472,56 +249,132 @@ async function doAnalyze() {
 """
 
 
-# ----------------------------
-# API endpoints
-# ----------------------------
 @app.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == body.email).first()
+    email = (body.email or "").strip().lower()
+    user = db.query(User).filter(User.email == email).first()
     if not user or not verify_password(body.password, user.password_hash):
-        raise HTTPException(401, "Invalid credentials")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
     return {"access_token": create_token(user.id)}
 
 
-@app.post("/upload")
-async def upload_image(file: UploadFile = File(...), user_id: int = Depends(require_user)):
-    upload_id = new_upload_id()
-    path = await save_upload(upload_id, file)
-    return {"upload_id": upload_id, "path": path}
+@app.post("/scan/run", response_model=ScanResult)
+async def scan_run(
+    eye_mode: str = Form(...),
+    file: UploadFile | None = File(None),
+    left_file: UploadFile | None = File(None),
+    right_file: UploadFile | None = File(None),
+    user_id: int = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    eye_mode = (eye_mode or "").strip().lower()
+    if eye_mode not in ("left", "right", "both"):
+        raise HTTPException(400, detail="eye_mode must be left/right/both")
 
+    try:
+        if eye_mode == "both":
+            if left_file is None or right_file is None:
+                raise HTTPException(400, detail="left_file and right_file are required for both")
 
-@app.post("/scan/create", response_model=ScanResponse)
-def create_scan(body: ScanCreateRequest, db: Session = Depends(get_db), user_id: int = Depends(require_user)):
-    image_path = upload_target_path(body.upload_id)
-    if not os.path.exists(image_path):
-        raise HTTPException(400, "Upload not found")
+            left_id = new_upload_id()
+            right_id = new_upload_id()
 
-    scan = Scan(user_id=user_id, eye=body.eye, image_path=image_path, status=ScanStatus.queued)
-    db.add(scan)
-    db.commit()
-    db.refresh(scan)
+            left_bytes = await left_file.read()
+            right_bytes = await right_file.read()
 
-    # For cloud demo: always async via worker
-    process_scan.delay(scan.id)
-    return {"id": scan.id, "status": scan.status.value, "result": None, "report_url": None}
+            left_key = key_for("left", left_id)
+            right_key = key_for("right", right_id)
 
+            put_bytes(left_key, left_bytes, left_file.content_type or "image/jpeg")
+            put_bytes(right_key, right_bytes, right_file.content_type or "image/jpeg")
 
-@app.get("/scan/{scan_id}", response_model=ScanResponse)
-def get_scan(scan_id: int, db: Session = Depends(get_db), user_id: int = Depends(require_user)):
-    scan = db.get(Scan, scan_id)
-    if not scan or scan.user_id != user_id:
-        raise HTTPException(404, "Not found")
+            left_diag = predict_diagnosis(left_bytes)
+            right_diag = predict_diagnosis(right_bytes)
 
-    safe_result = make_json_safe(decode_db_result(scan.result))
-    report_url = f"/scan/{scan.id}/report" if scan.report_path and scan.status == ScanStatus.done else None
-    return {"id": scan.id, "status": scan.status.value, "result": safe_result, "report_url": report_url}
+            scan = Scan(
+                user_id=user_id,
+                eye_mode="both",
+                left_key=left_key,
+                right_key=right_key,
+                left_diagnosis=left_diag,
+                right_diagnosis=right_diag,
+                status="done",
+            )
+            db.add(scan)
+            db.commit()
+            db.refresh(scan)
 
+            return ScanResult(
+                id=scan.id,
+                eye_mode=scan.eye_mode,
+                left_diagnosis=scan.left_diagnosis,
+                right_diagnosis=scan.right_diagnosis,
+                status=scan.status,
+                error=None,
+            )
 
-@app.get("/scan/{scan_id}/report")
-def get_report(scan_id: int, db: Session = Depends(get_db), user_id: int = Depends(require_user)):
-    scan = db.get(Scan, scan_id)
-    if not scan or scan.user_id != user_id or not scan.report_path:
-        raise HTTPException(404, "Not found")
+        # single eye
+        if file is None:
+            raise HTTPException(400, detail="file is required for left/right")
 
-    from fastapi.responses import FileResponse
-    return FileResponse(scan.report_path, media_type="application/pdf", filename=f"alati_report_{scan_id}.pdf")
+        upload_id = new_upload_id()
+        image_bytes = await file.read()
+
+        r2_key = key_for(eye_mode, upload_id)
+        put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
+
+        diag = predict_diagnosis(image_bytes)
+
+        scan = Scan(
+            user_id=user_id,
+            eye_mode=eye_mode,
+            left_key=r2_key if eye_mode == "left" else None,
+            right_key=r2_key if eye_mode == "right" else None,
+            left_diagnosis=diag if eye_mode == "left" else None,
+            right_diagnosis=diag if eye_mode == "right" else None,
+            status="done",
+        )
+        db.add(scan)
+        db.commit()
+        db.refresh(scan)
+
+        return ScanResult(
+            id=scan.id,
+            eye_mode=scan.eye_mode,
+            left_diagnosis=scan.left_diagnosis,
+            right_diagnosis=scan.right_diagnosis,
+            status=scan.status,
+            error=None,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Save failed scan
+        scan = Scan(
+            user_id=user_id,
+            eye_mode=eye_mode,
+            status="failed",
+            error=f"{type(e).__name__}: {str(e)}",
+        )
+        db.add(scan)
+        db.commit()
+        db.refresh(scan)
+
+        # Hide internals unless DEBUG_ERRORS=1
+        if str(settings.DEBUG_ERRORS).strip() == "1":
+            detail = scan.error
+        else:
+            detail = "Scan failed"
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "id": scan.id,
+                "eye_mode": scan.eye_mode,
+                "left_diagnosis": None,
+                "right_diagnosis": None,
+                "status": scan.status,
+                "error": detail,
+            },
+        )

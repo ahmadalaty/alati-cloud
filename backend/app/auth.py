@@ -1,63 +1,39 @@
-import jwt
-import hashlib
 from datetime import datetime, timedelta
-from fastapi import HTTPException, Header
+from jose import jwt, JWTError
+from passlib.context import CryptContext
+from fastapi import HTTPException, Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
 from .config import settings
 
-
-# =========================
-# Password utilities
-# =========================
-
-def hash_password(pw: str) -> str:
-    """
-    Simple SHA256 hash (OK for MVP / demo).
-    Replace with bcrypt/argon2 before production.
-    """
-    return hashlib.sha256(pw.encode("utf-8")).hexdigest()
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+bearer = HTTPBearer(auto_error=False)
 
 
-def verify_password(pw: str, hashed: str) -> bool:
-    return hash_password(pw) == hashed
+def hash_password(p: str) -> str:
+    return pwd_context.hash(p)
 
 
-# =========================
-# JWT utilities
-# =========================
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain, hashed)
+
 
 def create_token(user_id: int) -> str:
-    """
-    Create JWT token valid for 7 days.
-    """
-    payload = {
-        "sub": str(user_id),
-        "exp": datetime.utcnow() + timedelta(days=7),
-    }
-    return jwt.encode(payload, settings.JWT_SECRET, algorithm="HS256")
+    exp = datetime.utcnow() + timedelta(minutes=settings.JWT_EXPIRE_MINUTES)
+    payload = {"sub": str(user_id), "exp": exp}
+    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALG)
 
 
-def require_user(authorization: str = Header(None)) -> int:
-    """
-    FastAPI dependency for protected endpoints (Authorization header).
-    """
-    if not authorization or not authorization.startswith("Bearer "):
+def require_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> int:
+    if creds is None or not creds.credentials:
         raise HTTPException(status_code=401, detail="Missing token")
 
-    token = authorization.split(" ", 1)[1]
+    token = creds.credentials
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
-        return int(payload["sub"])
-    except Exception:
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALG])
+        sub = payload.get("sub")
+        if not sub:
+            raise HTTPException(401, "Invalid token")
+        return int(sub)
+    except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
-
-
-def decode_token(token: str) -> int | None:
-    """
-    Decode JWT from query string (used for PDF download links).
-    Returns user_id or None.
-    """
-    try:
-        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
-        return int(payload.get("sub"))
-    except Exception:
-        return None

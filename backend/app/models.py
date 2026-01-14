@@ -1,30 +1,29 @@
-import enum
-from sqlalchemy import String, Integer, DateTime, Enum, JSON, ForeignKey
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from datetime import datetime
+from sqlalchemy import Column, Integer, String, DateTime, Text, func
 from .db import Base
 
-class ScanStatus(str, enum.Enum):
-    queued = "queued"
-    running = "running"
-    done = "done"
-    failed = "failed"
 
 class User(Base):
     __tablename__ = "users"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    password_hash: Mapped[str] = mapped_column(String(255))
+
+    id = Column(Integer, primary_key=True)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+
 
 class Scan(Base):
     __tablename__ = "scans"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    status: Mapped[ScanStatus] = mapped_column(Enum(ScanStatus), default=ScanStatus.queued)
-    eye: Mapped[str] = mapped_column(String(2))  # OD/OS
-    image_path: Mapped[str] = mapped_column(String(500))
-    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    report_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
-    user = relationship("User")
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, index=True, nullable=False)
+
+    eye_mode = Column(String(10), nullable=False)  # left/right/both
+    left_key = Column(String(512), nullable=True)
+    right_key = Column(String(512), nullable=True)
+
+    left_diagnosis = Column(String(255), nullable=True)
+    right_diagnosis = Column(String(255), nullable=True)
+
+    status = Column(String(20), nullable=False, default="done")  # done/failed
+    error = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
