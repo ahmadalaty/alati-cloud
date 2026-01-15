@@ -19,10 +19,13 @@ Base.metadata.create_all(bind=engine)
 def upsert_admin():
     db = SessionLocal()
     try:
-        email = (settings.OWNER_EMAIL or "").strip().lower()
-        password = (settings.OWNER_PASSWORD or "").strip()
-        if not email or not password:
-            return
+        # Always seed one known admin for demo
+        # (you can change these via env)
+        email = (settings.OWNER_EMAIL or "admin@alati.ai").strip().lower()
+        password = (settings.OWNER_PASSWORD or "admin123").strip()
+
+        # bcrypt/passlib hard limit: 72 bytes
+        password = password[:72]
 
         user = db.query(User).filter(User.email == email).first()
         if not user:
@@ -56,14 +59,12 @@ def debug():
         "inference_marker": INF_MARKER,
         "r2_bucket_set": bool(settings.R2_BUCKET),
         "demo_mode": settings.DEMO_MODE,
+        "debug_errors": settings.DEBUG_ERRORS,
     }
 
 
 @app.get("/", response_class=HTMLResponse)
 def ui():
-    # Clean single-page UI:
-    # - login section
-    # - scan section after login
     return """
 <!doctype html>
 <html>
@@ -89,6 +90,7 @@ def ui():
     .result{padding:14px;border-radius:14px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.12);margin-top:10px;}
     .big{font-size:18px;font-weight:800;}
     a{color:#9fb3ff;}
+    pre{white-space:pre-wrap;word-break:break-word;margin:0;}
   </style>
 </head>
 <body>
@@ -101,7 +103,7 @@ def ui():
     <label>Email</label>
     <input id="email" placeholder="admin@alati.ai"/>
     <label>Password</label>
-    <input id="password" type="password" placeholder="••••••••"/>
+    <input id="password" type="password" placeholder="admin123"/>
     <div style="height:10px"></div>
     <button id="btnLogin" onclick="doLogin()">Login</button>
     <p id="loginStatus" class="muted"></p>
@@ -121,7 +123,7 @@ def ui():
     <div id="singleBox">
       <label>Image (upload or camera)</label>
       <input id="singleFile" type="file" accept="image/*" capture="environment"/>
-      <p class="muted">On mobile: this opens camera. On desktop: file picker.</p>
+      <p class="muted">Mobile: opens camera. Desktop: file picker.</p>
     </div>
 
     <div id="bothBox" style="display:none;">
@@ -142,8 +144,8 @@ def ui():
     <p id="scanStatus" class="muted"></p>
 
     <div class="result" id="resultBox" style="display:none;">
-      <div class="big" id="diagTitle">Diagnosis</div>
-      <div id="diagText" style="margin-top:8px;"></div>
+      <div class="big">Diagnosis</div>
+      <pre id="diagText" style="margin-top:8px;"></pre>
     </div>
   </div>
 
@@ -225,16 +227,14 @@ async function runScan(){
       document.getElementById("diagText").textContent = data.error || "Unknown error";
     }else{
       setStatus("scanStatus","Done ✅",true);
-
       let txt = "";
       if(data.eye_mode === "both"){
-        txt = "Left: " + (data.left_diagnosis || "-") + "\\nRight: " + (data.right_diagnosis || "-");
+        txt = "Left: " + (data.left_diagnosis || "Unknown") + "\\nRight: " + (data.right_diagnosis || "Unknown");
       }else if(data.eye_mode === "left"){
-        txt = "Left: " + (data.left_diagnosis || "-");
+        txt = "Left: " + (data.left_diagnosis || "Unknown");
       }else{
-        txt = "Right: " + (data.right_diagnosis || "-");
+        txt = "Right: " + (data.right_diagnosis || "Unknown");
       }
-
       document.getElementById("diagText").textContent = txt;
     }
 
@@ -276,11 +276,11 @@ async def scan_run(
             if left_file is None or right_file is None:
                 raise HTTPException(400, detail="left_file and right_file are required for both")
 
-            left_id = new_upload_id()
-            right_id = new_upload_id()
-
             left_bytes = await left_file.read()
             right_bytes = await right_file.read()
+
+            left_id = new_upload_id()
+            right_id = new_upload_id()
 
             left_key = key_for("left", left_id)
             right_key = key_for("right", right_id)
@@ -288,8 +288,8 @@ async def scan_run(
             put_bytes(left_key, left_bytes, left_file.content_type or "image/jpeg")
             put_bytes(right_key, right_bytes, right_file.content_type or "image/jpeg")
 
-            left_diag = predict_diagnosis(left_bytes)
-            right_diag = predict_diagnosis(right_bytes)
+            left_diag = str(predict_diagnosis(left_bytes) or "Unknown")
+            right_diag = str(predict_diagnosis(right_bytes) or "Unknown")
 
             scan = Scan(
                 user_id=user_id,
@@ -299,6 +299,7 @@ async def scan_run(
                 left_diagnosis=left_diag,
                 right_diagnosis=right_diag,
                 status="done",
+                error=None,
             )
             db.add(scan)
             db.commit()
@@ -317,13 +318,13 @@ async def scan_run(
         if file is None:
             raise HTTPException(400, detail="file is required for left/right")
 
-        upload_id = new_upload_id()
         image_bytes = await file.read()
+        upload_id = new_upload_id()
 
         r2_key = key_for(eye_mode, upload_id)
         put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
 
-        diag = predict_diagnosis(image_bytes)
+        diag = str(predict_diagnosis(image_bytes) or "Unknown")
 
         scan = Scan(
             user_id=user_id,
@@ -333,6 +334,7 @@ async def scan_run(
             left_diagnosis=diag if eye_mode == "left" else None,
             right_diagnosis=diag if eye_mode == "right" else None,
             status="done",
+            error=None,
         )
         db.add(scan)
         db.commit()
@@ -350,22 +352,13 @@ async def scan_run(
     except HTTPException:
         raise
     except Exception as e:
-        # Save failed scan
-        scan = Scan(
-            user_id=user_id,
-            eye_mode=eye_mode,
-            status="failed",
-            error=f"{type(e).__name__}: {str(e)}",
-        )
+        err = f"{type(e).__name__}: {str(e)}"
+        scan = Scan(user_id=user_id, eye_mode=eye_mode, status="failed", error=err)
         db.add(scan)
         db.commit()
         db.refresh(scan)
 
-        # Hide internals unless DEBUG_ERRORS=1
-        if str(settings.DEBUG_ERRORS).strip() == "1":
-            detail = scan.error
-        else:
-            detail = "Scan failed"
+        detail = err if str(settings.DEBUG_ERRORS).strip() == "1" else "Scan failed"
 
         return JSONResponse(
             status_code=500,
