@@ -1,4 +1,7 @@
 import os
+import json
+from typing import Optional
+
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
@@ -8,24 +11,45 @@ from .db import Base, engine, get_db, SessionLocal
 from .models import User, Scan
 from .schemas import LoginRequest, TokenResponse, ScanResult
 from .auth import hash_password, verify_password, create_token, require_user
-from .storage_r2 import new_upload_id, key_for, put_bytes, BUILD_MARKER as STORAGE_MARKER
-from .inference import predict_diagnosis, BUILD_MARKER as INF_MARKER, ACTIVE_VARIANT
 
+# R2-only storage (your file: storage_r2.py)
+from .storage_r2 import new_upload_id, key_for, put_bytes, BUILD_MARKER as STORAGE_MARKER
+
+# Inference (your file: inference.py)
+from .inference import (
+    predict_diagnosis,
+    BUILD_MARKER as INF_MARKER,
+    ACTIVE_VARIANT,
+)
 
 app = FastAPI(title="Alati Cloud Demo (No Worker)")
 Base.metadata.create_all(bind=engine)
 
 
+# -----------------------------
+# Helpers
+# -----------------------------
+def _make_json_safe(obj):
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): _make_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_make_json_safe(x) for x in obj]
+    return str(obj)
+
+
 def upsert_admin():
+    """
+    Ensures there is an admin user based on OWNER_EMAIL/OWNER_PASSWORD.
+    """
     db = SessionLocal()
     try:
-        # Always seed one known admin for demo
-        # (you can change these via env)
-        email = (settings.OWNER_EMAIL or "admin@alati.ai").strip().lower()
-        password = (settings.OWNER_PASSWORD or "admin123").strip()
+        email = (settings.OWNER_EMAIL or "").strip().lower()
+        password = (settings.OWNER_PASSWORD or "").strip()
 
-        # bcrypt/passlib hard limit: 72 bytes
-        password = password[:72]
+        if not email or not password:
+            return
 
         user = db.query(User).filter(User.email == email).first()
         if not user:
@@ -45,6 +69,9 @@ def startup():
     upsert_admin()
 
 
+# -----------------------------
+# Health / Debug
+# -----------------------------
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -52,17 +79,26 @@ def health():
 
 @app.get("/debug")
 def debug():
+    """
+    Keep this endpoint non-sensitive.
+    It confirms that the new code is running and that R2/model markers match.
+    """
     return {
-        "storage_mode": settings.STORAGE_MODE,
-        "model_variant": ACTIVE_VARIANT,
+        "ok": True,
+        "demo_mode": str(settings.DEMO_MODE),
+        "debug_errors": str(settings.DEBUG_ERRORS),
+        "storage_mode": str(settings.STORAGE_MODE),
+        "r2_bucket_set": bool(getattr(settings, "R2_BUCKET", "")),
+        "model_variant_env": os.getenv("MODEL_VARIANT"),
+        "active_variant": ACTIVE_VARIANT,
         "storage_marker": STORAGE_MARKER,
         "inference_marker": INF_MARKER,
-        "r2_bucket_set": bool(settings.R2_BUCKET),
-        "demo_mode": settings.DEMO_MODE,
-        "debug_errors": settings.DEBUG_ERRORS,
     }
 
 
+# -----------------------------
+# UI (single page)
+# -----------------------------
 @app.get("/", response_class=HTMLResponse)
 def ui():
     return """
@@ -90,7 +126,7 @@ def ui():
     .result{padding:14px;border-radius:14px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.12);margin-top:10px;}
     .big{font-size:18px;font-weight:800;}
     a{color:#9fb3ff;}
-    pre{white-space:pre-wrap;word-break:break-word;margin:0;}
+    .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);font-size:12px;opacity:.9;}
   </style>
 </head>
 <body>
@@ -99,11 +135,12 @@ def ui():
   <p class="sub">Login → choose eye → take photo / upload → diagnosis only.</p>
 
   <div class="card" id="loginCard">
-    <h3 style="margin:0 0 8px;">1) Login</h3>
+    <div class="pill">No Worker (sync inference)</div>
+    <h3 style="margin:10px 0 8px;">1) Login</h3>
     <label>Email</label>
     <input id="email" placeholder="admin@alati.ai"/>
     <label>Password</label>
-    <input id="password" type="password" placeholder="admin123"/>
+    <input id="password" type="password" placeholder="••••••••"/>
     <div style="height:10px"></div>
     <button id="btnLogin" onclick="doLogin()">Login</button>
     <p id="loginStatus" class="muted"></p>
@@ -123,7 +160,7 @@ def ui():
     <div id="singleBox">
       <label>Image (upload or camera)</label>
       <input id="singleFile" type="file" accept="image/*" capture="environment"/>
-      <p class="muted">Mobile: opens camera. Desktop: file picker.</p>
+      <p class="muted">On mobile: this opens camera. On desktop: file picker.</p>
     </div>
 
     <div id="bothBox" style="display:none;">
@@ -144,8 +181,8 @@ def ui():
     <p id="scanStatus" class="muted"></p>
 
     <div class="result" id="resultBox" style="display:none;">
-      <div class="big">Diagnosis</div>
-      <pre id="diagText" style="margin-top:8px;"></pre>
+      <div class="big" id="diagTitle">Diagnosis</div>
+      <div id="diagText" style="margin-top:8px;white-space:pre-wrap;"></div>
     </div>
   </div>
 
@@ -227,14 +264,16 @@ async function runScan(){
       document.getElementById("diagText").textContent = data.error || "Unknown error";
     }else{
       setStatus("scanStatus","Done ✅",true);
+
       let txt = "";
       if(data.eye_mode === "both"){
-        txt = "Left: " + (data.left_diagnosis || "Unknown") + "\\nRight: " + (data.right_diagnosis || "Unknown");
+        txt = "Left: " + (data.left_diagnosis || "-") + "\\nRight: " + (data.right_diagnosis || "-");
       }else if(data.eye_mode === "left"){
-        txt = "Left: " + (data.left_diagnosis || "Unknown");
+        txt = "Left: " + (data.left_diagnosis || "-");
       }else{
-        txt = "Right: " + (data.right_diagnosis || "Unknown");
+        txt = "Right: " + (data.right_diagnosis || "-");
       }
+
       document.getElementById("diagText").textContent = txt;
     }
 
@@ -249,6 +288,9 @@ async function runScan(){
 """
 
 
+# -----------------------------
+# Auth
+# -----------------------------
 @app.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
     email = (body.email or "").strip().lower()
@@ -258,29 +300,36 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     return {"access_token": create_token(user.id)}
 
 
+# -----------------------------
+# Scan (NO WORKER)
+# -----------------------------
 @app.post("/scan/run", response_model=ScanResult)
 async def scan_run(
     eye_mode: str = Form(...),
-    file: UploadFile | None = File(None),
-    left_file: UploadFile | None = File(None),
-    right_file: UploadFile | None = File(None),
+    file: Optional[UploadFile] = File(None),
+    left_file: Optional[UploadFile] = File(None),
+    right_file: Optional[UploadFile] = File(None),
     user_id: int = Depends(require_user),
     db: Session = Depends(get_db),
 ):
+    """
+    R2-only. No tmp paths. No celery.
+    Saves to DB + returns diagnosis only.
+    """
     eye_mode = (eye_mode or "").strip().lower()
     if eye_mode not in ("left", "right", "both"):
-        raise HTTPException(400, detail="eye_mode must be left/right/both")
+        raise HTTPException(status_code=400, detail="eye_mode must be left/right/both")
 
     try:
         if eye_mode == "both":
             if left_file is None or right_file is None:
-                raise HTTPException(400, detail="left_file and right_file are required for both")
-
-            left_bytes = await left_file.read()
-            right_bytes = await right_file.read()
+                raise HTTPException(status_code=400, detail="left_file and right_file are required for both")
 
             left_id = new_upload_id()
             right_id = new_upload_id()
+
+            left_bytes = await left_file.read()
+            right_bytes = await right_file.read()
 
             left_key = key_for("left", left_id)
             right_key = key_for("right", right_id)
@@ -288,8 +337,8 @@ async def scan_run(
             put_bytes(left_key, left_bytes, left_file.content_type or "image/jpeg")
             put_bytes(right_key, right_bytes, right_file.content_type or "image/jpeg")
 
-            left_diag = str(predict_diagnosis(left_bytes) or "Unknown")
-            right_diag = str(predict_diagnosis(right_bytes) or "Unknown")
+            left_diag = predict_diagnosis(left_bytes)
+            right_diag = predict_diagnosis(right_bytes)
 
             scan = Scan(
                 user_id=user_id,
@@ -316,15 +365,15 @@ async def scan_run(
 
         # single eye
         if file is None:
-            raise HTTPException(400, detail="file is required for left/right")
+            raise HTTPException(status_code=400, detail="file is required for left/right")
 
-        image_bytes = await file.read()
         upload_id = new_upload_id()
+        image_bytes = await file.read()
 
         r2_key = key_for(eye_mode, upload_id)
         put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
 
-        diag = str(predict_diagnosis(image_bytes) or "Unknown")
+        diag = predict_diagnosis(image_bytes)
 
         scan = Scan(
             user_id=user_id,
@@ -352,22 +401,31 @@ async def scan_run(
     except HTTPException:
         raise
     except Exception as e:
+        # Persist failure
         err = f"{type(e).__name__}: {str(e)}"
-        scan = Scan(user_id=user_id, eye_mode=eye_mode, status="failed", error=err)
+        scan = Scan(
+            user_id=user_id,
+            eye_mode=eye_mode,
+            status="failed",
+            error=err,
+        )
         db.add(scan)
         db.commit()
         db.refresh(scan)
 
+        # Hide internals unless DEBUG_ERRORS=1
         detail = err if str(settings.DEBUG_ERRORS).strip() == "1" else "Scan failed"
 
         return JSONResponse(
             status_code=500,
-            content={
-                "id": scan.id,
-                "eye_mode": scan.eye_mode,
-                "left_diagnosis": None,
-                "right_diagnosis": None,
-                "status": scan.status,
-                "error": detail,
-            },
+            content=_make_json_safe(
+                {
+                    "id": scan.id,
+                    "eye_mode": scan.eye_mode,
+                    "left_diagnosis": None,
+                    "right_diagnosis": None,
+                    "status": scan.status,
+                    "error": detail,
+                }
+            ),
         )

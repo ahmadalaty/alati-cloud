@@ -1,77 +1,50 @@
 import json
 import os
 from io import BytesIO
-from typing import List, Any
+from typing import Dict, Tuple
 
 import torch
 import torchvision.transforms as T
 from PIL import Image
 
-# Marker to confirm correct file is running
-BUILD_MARKER = "BACKEND_INFERENCE_DIAG_ONLY_v1_2026_01_15"
+BUILD_MARKER = "INFERENCE_V2_DIAG_ONLY_WITH_DEBUG_2026_01_15"
 
 BASE_DIR = os.path.dirname(__file__)
 MODEL_DIR = os.path.join(BASE_DIR, "model_files")
 
-
-def _normalize_labels(raw: Any) -> List[str]:
-    """
-    Accepts labels.json in many shapes and returns a clean list[str] indexed by class id.
-    Supported:
-      - ["N","D","G",...]
-      - {"0":"N","1":"D",...}
-      - [{"label":"N"}, {"label":"D"}] or [{"name":"N"}, ...] or [{"0":"N"}, ...]
-    """
-    if raw is None:
-        return []
-
-    # dict: {"0":"N", ...}
-    if isinstance(raw, dict):
-        items = []
-        for k, v in raw.items():
-            try:
-                idx = int(k)
-            except Exception:
-                continue
-            # v can be str or dict
-            if isinstance(v, str):
-                label = v
-            elif isinstance(v, dict):
-                label = v.get("label") or v.get("name") or next(iter(v.values()), "")
-            else:
-                label = str(v)
-            items.append((idx, str(label)))
-        items.sort(key=lambda x: x[0])
-        return [lbl for _, lbl in items if lbl]
-
-    # list: ["N", ...] or [{"label":"N"}, ...]
-    if isinstance(raw, list):
-        out = []
-        for x in raw:
-            if isinstance(x, str):
-                out.append(x)
-            elif isinstance(x, dict):
-                label = x.get("label") or x.get("name")
-                if not label and len(x) == 1:
-                    label = str(next(iter(x.values())))
-                out.append(str(label) if label else "")
-            else:
-                out.append(str(x))
-        return [x for x in out if x]
-
-    return []
-
-
-# Load labels
 LABELS_PATH = os.path.join(MODEL_DIR, "labels.json")
+
+# If your labels.json is a list like ["N","D","G","C","A","H","M","O"]
+# keep it as-is. If it's a dict, we try to normalize it.
 with open(LABELS_PATH, "r", encoding="utf-8") as f:
-    _RAW_LABELS = json.load(f)
+    _labels_raw = json.load(f)
 
-LABELS = _normalize_labels(_RAW_LABELS)
+if isinstance(_labels_raw, dict):
+    # try best effort: sort by key if keys are numeric-like, otherwise values order
+    try:
+        LABELS = [_labels_raw[str(i)] for i in range(len(_labels_raw))]
+    except Exception:
+        LABELS = list(_labels_raw.values())
+else:
+    LABELS = list(_labels_raw)
+
+# Hard safety: if labels are not ODIR-8, you'll see it in /debug
+ODIR_EXPECTED = ["N", "D", "G", "C", "A", "H", "M", "O"]
+
+LABEL_TO_NAME = {
+    "N": "Normal",
+    "D": "Diabetic Retinopathy",
+    "G": "Glaucoma",
+    "C": "Cataract",
+    "A": "AMD",
+    "H": "Hypertension",
+    "M": "Myopia",
+    "O": "Others",
+}
+
 NUM_CLASSES = len(LABELS)
-
-# Model choice
-ACTIVE_VARIANT = os.getenv("MODEL_VARIANT", "resnet18").strip().lower() or "resnet18"
+DEFAULT_VARIANT = os.getenv("MODEL_VARIANT", "resnet18").strip().lower()
+DEVICE = "cpu"
 
 
 def _clean_state_dict(state: dict) -> dict:
@@ -90,56 +63,59 @@ def _clean_state_dict(state: dict) -> dict:
 
 def _extract_state_dict(ckpt):
     if isinstance(ckpt, dict):
-        if isinstance(ckpt.get("state_dict"), dict):
+        if "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
             return ckpt["state_dict"]
-        if isinstance(ckpt.get("model_state_dict"), dict):
+        if "model_state_dict" in ckpt and isinstance(ckpt["model_state_dict"], dict):
             return ckpt["model_state_dict"]
         return ckpt
     return None
 
 
-def load_model(model_variant: str):
+def load_model(model_variant: str) -> Tuple[torch.nn.Module, str, str]:
     model_variant = (model_variant or "resnet18").strip().lower()
+
     if model_variant == "resnet50":
         from torchvision.models import resnet50
-
         model = resnet50(weights=None)
         weights_path = os.path.join(MODEL_DIR, "alati_dualeye_model_resnet50.pth")
-        model_variant = "resnet50"
+        active = "resnet50"
     else:
         from torchvision.models import resnet18
-
         model = resnet18(weights=None)
         weights_path = os.path.join(MODEL_DIR, "alati_dualeye_model_resnet18.pth")
-        model_variant = "resnet18"
+        active = "resnet18"
 
-    if NUM_CLASSES <= 0:
-        raise RuntimeError("labels.json produced 0 classes after normalization")
-
+    # Set classifier head to NUM_CLASSES
     model.fc = torch.nn.Linear(model.fc.in_features, NUM_CLASSES)
 
-    ckpt = torch.load(weights_path, map_location="cpu")
+    if not os.path.exists(weights_path):
+        # This is the #1 reason you get constant "Others"
+        raise RuntimeError(f"Model weights file not found: {weights_path}")
+
+    ckpt = torch.load(weights_path, map_location=DEVICE)
 
     # full model saved
     if not isinstance(ckpt, dict):
         ckpt.eval()
-        return ckpt, model_variant
+        return ckpt, active, "loaded_full_model_object"
 
     state = _extract_state_dict(ckpt)
     if state is None:
         raise RuntimeError("Checkpoint format not understood (no state_dict found)")
 
     state = _clean_state_dict(state)
+
+    # load with fallback non-strict
     try:
         model.load_state_dict(state, strict=True)
-    except RuntimeError:
+        load_mode = "strict"
+    except Exception:
         model.load_state_dict(state, strict=False)
+        load_mode = "non_strict"
 
     model.eval()
-    return model, model_variant
+    return model, active, load_mode
 
-
-MODEL, ACTIVE_VARIANT = load_model(ACTIVE_VARIANT)
 
 TRANSFORM = T.Compose(
     [
@@ -149,26 +125,62 @@ TRANSFORM = T.Compose(
     ]
 )
 
+MODEL, ACTIVE_VARIANT, LOAD_MODE = load_model(DEFAULT_VARIANT)
 
-def predict_diagnosis(image_bytes: bytes) -> str:
-    """
-    Returns diagnosis ONLY as a string label (e.g., "N", "D", ...).
-    Never returns dict/probs.
-    """
-    if not image_bytes:
-        return "Unknown"
 
+def _probs_from_bytes(image_bytes: bytes) -> Dict[str, float]:
     img = Image.open(BytesIO(image_bytes)).convert("RGB")
     x = TRANSFORM(img).unsqueeze(0)
 
     with torch.no_grad():
         logits = MODEL(x)
-        probs = torch.sigmoid(logits)[0]
+        # ODIR can be multi-label, so sigmoid is fine.
+        probs = torch.sigmoid(logits)[0].detach().cpu().tolist()
 
-    # Safe top class
-    best_i = int(torch.argmax(probs).item())
-    if best_i < 0 or best_i >= len(LABELS):
-        return "Unknown"
+    # map using LABELS order (this must match training!)
+    out = {}
+    for i in range(min(len(probs), len(LABELS))):
+        out[str(LABELS[i])] = float(probs[i])
+    return out
 
-    label = LABELS[best_i]
-    return str(label or "Unknown")
+
+def predict_diagnosis(image_bytes: bytes) -> str:
+    probs = _probs_from_bytes(image_bytes)
+
+    if not probs:
+        return "Uncertain"
+
+    # choose the max label
+    top_label = max(probs, key=probs.get)
+    top_prob = probs[top_label]
+
+    # IMPORTANT:
+    # If model is uncertain, do NOT default to "Others" (it becomes constant).
+    # This prevents “Others” spam when probabilities are flat.
+    if top_prob < 0.50:
+        return "Uncertain"
+
+    return LABEL_TO_NAME.get(top_label, str(top_label))
+
+
+def predict_debug(image_bytes: bytes) -> dict:
+    probs = _probs_from_bytes(image_bytes)
+    if probs:
+        top_label = max(probs, key=probs.get)
+        top_prob = probs[top_label]
+    else:
+        top_label, top_prob = None, None
+
+    # show top 3 for debugging only
+    top3 = sorted(probs.items(), key=lambda kv: kv[1], reverse=True)[:3]
+
+    return {
+        "build_marker": BUILD_MARKER,
+        "active_variant": ACTIVE_VARIANT,
+        "load_mode": LOAD_MODE,
+        "labels": LABELS,
+        "labels_expected_odir8": ODIR_EXPECTED,
+        "top_label": top_label,
+        "top_prob": top_prob,
+        "top3": top3,
+    }
