@@ -25,30 +25,24 @@ def _clean_diag(diag) -> str:
     """
     Ensure diagnosis shown on UI is ONLY a clean professional name.
     Handles:
-      - dict like {"code":"D","name":"diabetic_retinopathy"}
-      - string like "diabetic retinopathy"
+      - dict like {"code":"D","name":"diabetic_retinopathy"}  (legacy safety)
+      - string like "Diabetic Retinopathy"
     """
     if diag is None:
-        return "uncertain"
+        return "Uncertain"
 
-    # if dict returned
     if isinstance(diag, dict):
-        diag = diag.get("name") or diag.get("code") or "uncertain"
+        diag = diag.get("name") or diag.get("code") or "Uncertain"
 
-    # if still not string
     if not isinstance(diag, str):
         diag = str(diag)
 
     diag = diag.strip()
     if not diag:
-        return "uncertain"
+        return "Uncertain"
 
-    # normalize
     diag = diag.replace("_", " ").replace("-", " ").strip()
-
-    # polish to Title Case
-    diag = " ".join([w.capitalize() for w in diag.split()])
-
+    diag = " ".join(w.capitalize() for w in diag.split())
     return diag
 
 
@@ -57,6 +51,7 @@ def upsert_admin():
     try:
         email = (settings.OWNER_EMAIL or "").strip().lower()
         password = (settings.OWNER_PASSWORD or "").strip()
+
         if not email or not password:
             return
 
@@ -354,6 +349,7 @@ async def scan_run(
         raise HTTPException(400, detail="eye_mode must be left/right/both")
 
     try:
+        # BOTH EYES
         if eye_mode == "both":
             if left_file is None or right_file is None:
                 raise HTTPException(400, detail="left_file and right_file are required for both")
@@ -408,7 +404,7 @@ async def scan_run(
                 error=None,
             )
 
-        # single eye
+        # SINGLE EYE
         if file is None:
             raise HTTPException(400, detail="file is required for left/right")
 

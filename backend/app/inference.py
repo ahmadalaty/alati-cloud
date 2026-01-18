@@ -1,13 +1,13 @@
 import json
 import os
 from io import BytesIO
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 import torch
 import torchvision.transforms as T
 from PIL import Image
 
-BUILD_MARKER = "INFERENCE_V3_STRING_ONLY_2026_01_18"
+BUILD_MARKER = "INFERENCE_V4_FIX_LABELS_LIST_OF_DICTS_2026_01_18"
 
 BASE_DIR = os.path.dirname(__file__)
 MODEL_DIR = os.path.join(BASE_DIR, "model_files")
@@ -17,30 +17,53 @@ LABELS_PATH = os.path.join(MODEL_DIR, "labels.json")
 with open(LABELS_PATH, "r", encoding="utf-8") as f:
     labels_raw = json.load(f)
 
-# normalize labels
-if isinstance(labels_raw, dict):
+# ✅ IMPORTANT: your labels.json is a LIST of dicts: [{"code":"N","name":"normal"}, ...]
+# We normalize it to:
+#   LABEL_CODES = ["N","D","G","C","A","H","M","O"]
+#   CODE_TO_NAME = {"N":"normal", "D":"diabetic retinopathy", ...}
+
+LABEL_CODES: List[str] = []
+CODE_TO_NAME: Dict[str, str] = {}
+
+if isinstance(labels_raw, list) and labels_raw and isinstance(labels_raw[0], dict):
+    for item in labels_raw:
+        code = str(item.get("code", "")).strip().upper()
+        name = str(item.get("name", "")).strip().lower()
+
+        if not code:
+            continue
+
+        # polish name
+        name = name.replace("_", " ").replace("-", " ").strip()
+        if not name:
+            name = code.lower()
+
+        LABEL_CODES.append(code)
+        CODE_TO_NAME[code] = name
+
+elif isinstance(labels_raw, list):
+    # fallback: ["N","D","G"...]
+    for x in labels_raw:
+        code = str(x).strip().upper()
+        LABEL_CODES.append(code)
+        CODE_TO_NAME[code] = code.lower()
+
+elif isinstance(labels_raw, dict):
+    # fallback: {"0":"N","1":"D"...}
     try:
-        LABELS = [labels_raw[str(i)] for i in range(len(labels_raw))]
+        for i in range(len(labels_raw)):
+            code = str(labels_raw[str(i)]).strip().upper()
+            LABEL_CODES.append(code)
+            CODE_TO_NAME[code] = code.lower()
     except Exception:
-        LABELS = list(labels_raw.values())
+        for _, v in labels_raw.items():
+            code = str(v).strip().upper()
+            LABEL_CODES.append(code)
+            CODE_TO_NAME[code] = code.lower()
 else:
-    LABELS = list(labels_raw)
+    raise RuntimeError("labels.json format not understood")
 
-# expected order (ODIR8) - for sanity check only
-ODIR_EXPECTED = ["N", "D", "G", "C", "A", "H", "M", "O"]
-
-LABEL_TO_NAME = {
-    "N": "normal",
-    "D": "diabetic retinopathy",
-    "G": "glaucoma",
-    "C": "cataract",
-    "A": "amd",
-    "H": "hypertensive retinopathy",
-    "M": "myopia",
-    "O": "other",
-}
-
-NUM_CLASSES = len(LABELS)
+NUM_CLASSES = len(LABEL_CODES)
 DEFAULT_VARIANT = os.getenv("MODEL_VARIANT", "resnet18").strip().lower()
 DEVICE = "cpu"
 
@@ -111,12 +134,13 @@ def load_model(model_variant: str) -> Tuple[torch.nn.Module, str, str]:
     return model, active, load_mode
 
 
-TRANSFORM = T.Compose([
-    T.Resize((224, 224)),
-    T.ToTensor(),
-    T.Normalize(mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]),
-])
+TRANSFORM = T.Compose(
+    [
+        T.Resize((224, 224)),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
 
 MODEL, ACTIVE_VARIANT, LOAD_MODE = load_model(DEFAULT_VARIANT)
 
@@ -129,50 +153,46 @@ def _probs_from_bytes(image_bytes: bytes) -> Dict[str, float]:
         logits = MODEL(x)
         probs = torch.sigmoid(logits)[0].detach().cpu().tolist()
 
-    out = {}
-    for i in range(min(len(probs), len(LABELS))):
-        out[str(LABELS[i])] = float(probs[i])
+    out: Dict[str, float] = {}
+    for i in range(min(len(probs), len(LABEL_CODES))):
+        out[LABEL_CODES[i]] = float(probs[i])
+
     return out
+
+
+def _title_case(name: str) -> str:
+    name = name.replace("_", " ").replace("-", " ").strip()
+    return " ".join(w.capitalize() for w in name.split())
 
 
 def predict_diagnosis(image_bytes: bytes) -> str:
     """
-    ALWAYS RETURNS STRING ONLY.
+    ✅ Returns STRING ONLY (never dict)
     """
     probs = _probs_from_bytes(image_bytes)
     if not probs:
-        return "uncertain"
+        return "Uncertain"
 
-    top_label = max(probs, key=probs.get)
-    top_prob = probs[top_label]
+    top_code = max(probs, key=probs.get)
+    top_prob = probs[top_code]
 
+    # if model is not confident
     if top_prob < 0.50:
-        return "uncertain"
+        return "Uncertain"
 
-    return LABEL_TO_NAME.get(top_label, str(top_label))
+    raw_name = CODE_TO_NAME.get(top_code, top_code)
+    return _title_case(raw_name)
 
 
 def predict_debug(image_bytes: bytes) -> dict:
     probs = _probs_from_bytes(image_bytes)
-
-    if probs:
-        top_label = max(probs, key=probs.get)
-        top_prob = probs[top_label]
-    else:
-        top_label, top_prob = None, None
-
     top3 = sorted(probs.items(), key=lambda kv: kv[1], reverse=True)[:3]
-
-    labels_ok = (LABELS == ODIR_EXPECTED)
 
     return {
         "build_marker": BUILD_MARKER,
-        "active_variant": ACTIVE_VARIANT,
+        "variant": ACTIVE_VARIANT,
         "load_mode": LOAD_MODE,
-        "labels": LABELS,
-        "labels_ok_odir_order": labels_ok,
-        "labels_expected_odir8": ODIR_EXPECTED,
-        "top_label": top_label,
-        "top_prob": top_prob,
+        "label_codes": LABEL_CODES,
+        "code_to_name": CODE_TO_NAME,
         "top3": top3,
     }
