@@ -1,4 +1,3 @@
-import os
 import hashlib
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -17,16 +16,16 @@ app = FastAPI(title="Alati Cloud Demo (No Worker, R2-only)")
 Base.metadata.create_all(bind=engine)
 
 
+# -------------------------
+# Helpers
+# -------------------------
 def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
 def _clean_diag(diag) -> str:
     """
-    Ensure diagnosis shown on UI is ONLY a clean professional name.
-    Handles:
-      - dict like {"code":"D","name":"diabetic_retinopathy"}  (legacy safety)
-      - string like "Diabetic Retinopathy"
+    Guarantee diagnosis is ONLY a clean professional string.
     """
     if diag is None:
         return "Uncertain"
@@ -43,19 +42,22 @@ def _clean_diag(diag) -> str:
 
     diag = diag.replace("_", " ").replace("-", " ").strip()
     diag = " ".join(w.capitalize() for w in diag.split())
+
     return diag
 
 
+# -------------------------
+# Admin seed
+# -------------------------
 def upsert_admin():
     db = SessionLocal()
     try:
         email = (settings.OWNER_EMAIL or "").strip().lower()
         password = (settings.OWNER_PASSWORD or "").strip()
-
         if not email or not password:
             return
 
-        # passlib/bcrypt max 72 bytes
+        # bcrypt max password bytes
         password = password[:72]
 
         user = db.query(User).filter(User.email == email).first()
@@ -76,6 +78,9 @@ def startup():
     upsert_admin()
 
 
+# -------------------------
+# Routes
+# -------------------------
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -89,8 +94,8 @@ def debug():
         "storage_marker": STORAGE_MARKER,
         "inference_marker": INF_MARKER,
         "r2_bucket_set": bool(settings.R2_BUCKET),
-        "demo_mode": getattr(settings, "DEMO_MODE", ""),
-        "labels_sanity": "Use /debug/inference for top3",
+        "debug_errors": getattr(settings, "DEBUG_ERRORS", ""),
+        "note": "POST /debug/inference with file=... to see label mapping + top3",
     }
 
 
@@ -117,27 +122,27 @@ def ui():
     .sub{opacity:.85;margin:0 0 18px;}
     label{display:block;font-size:13px;opacity:.85;margin:10px 0 6px;}
     input,select,button{width:100%;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.25);color:#e8ecff;font-size:15px;}
-    button{cursor:pointer;background:#355dff;border:0;font-weight:800;}
+    button{cursor:pointer;background:#355dff;border:0;font-weight:900;}
     button:disabled{opacity:.6;cursor:not-allowed;}
     .row{display:flex;gap:12px;align-items:flex-end;}
     .row>div{flex:1;}
     .muted{opacity:.8;font-size:13px;}
-    .ok{color:#67ffb1;font-weight:800;}
-    .bad{color:#ff8a8a;font-weight:800;}
+    .ok{color:#67ffb1;font-weight:900;}
+    .bad{color:#ff8a8a;font-weight:900;}
     .result{padding:14px;border-radius:14px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.12);margin-top:10px;}
-    .big{font-size:18px;font-weight:900;}
+    .big{font-size:18px;font-weight:1000;}
     a{color:#9fb3ff;}
     .tabs{display:flex;gap:10px;margin-top:8px;}
-    .tab{flex:1;padding:10px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.20);text-align:center;cursor:pointer;font-weight:800;}
+    .tab{flex:1;padding:10px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.20);text-align:center;cursor:pointer;font-weight:900;}
     .tab.active{background:#355dff;border-color:#355dff;}
     .hint{opacity:.75;font-size:12px;margin-top:6px;}
-    .diag{white-space:pre-line;font-size:16px;font-weight:900;line-height:1.6;}
+    .diag{white-space:pre-line;font-size:17px;font-weight:1000;line-height:1.7;}
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Alati Cloud Demo</h1>
-  <p class="sub">Login → choose eye → choose Upload/Camera → diagnosis only.</p>
+  <p class="sub">Login → choose eye → Upload/Camera → diagnosis only.</p>
 
   <div class="card" id="loginCard">
     <h3 style="margin:0 0 8px;">1) Login</h3>
@@ -166,7 +171,7 @@ def ui():
       <div class="tab active" id="tabUpload" onclick="setSource('upload')">Upload</div>
       <div class="tab" id="tabCamera" onclick="setSource('camera')">Camera</div>
     </div>
-    <div class="hint">Upload = pick photo. Camera = open camera capture.</div>
+    <div class="hint">Upload = pick photo (camera OR gallery). Camera = direct capture.</div>
 
     <div id="singleBox">
       <label>Image</label>
@@ -186,7 +191,7 @@ def ui():
       </div>
     </div>
 
-    <div style="height:10px"></div>
+    <div style="height:12px"></div>
     <button onclick="runScan()">Analyze</button>
     <p id="scanStatus" class="muted"></p>
 
@@ -200,7 +205,7 @@ def ui():
 
 <script>
 let TOKEN = null;
-let SOURCE = "upload"; // upload | camera
+let SOURCE = "upload";
 
 function setStatus(id, msg, ok=null){
   const el = document.getElementById(id);
@@ -218,19 +223,17 @@ function setSource(src){
 }
 
 function applyCapture(){
-  const cap = (SOURCE==="camera") ? "environment" : "";
   const inputs = ["singleFile","leftFile","rightFile"];
-
   for(const id of inputs){
     const el = document.getElementById(id);
     if(!el) continue;
 
     if(SOURCE==="camera"){
-      el.setAttribute("capture", cap);
+      el.setAttribute("capture", "environment");
     } else {
-      el.removeAttribute("capture"); // gives BOTH camera+upload choice on phones
+      // IMPORTANT: removing capture lets phone show BOTH upload + camera
+      el.removeAttribute("capture");
     }
-
     el.value = "";
   }
 }
@@ -279,7 +282,7 @@ async function runScan(){
     if(!lf || !rf){ setStatus("scanStatus","Please select both images.",false); return; }
     fd.append("left_file", lf);
     fd.append("right_file", rf);
-  }else{
+  } else {
     const f = document.getElementById("singleFile").files?.[0];
     if(!f){ setStatus("scanStatus","Please select an image.",false); return; }
     fd.append("file", f);
@@ -300,23 +303,23 @@ async function runScan(){
     if(data.status !== "done"){
       setStatus("scanStatus","Failed ❌",false);
       document.getElementById("diagText").textContent = data.error || "Unknown error";
-    }else{
+    } else {
       setStatus("scanStatus","Done ✅",true);
 
       let txt = "";
       if(data.eye_mode === "both"){
         txt = "Left: " + (data.left_diagnosis || "-") + "\\nRight: " + (data.right_diagnosis || "-");
-      }else if(data.eye_mode === "left"){
-        txt = "Left: " + (data.left_diagnosis || "-");
-      }else{
-        txt = "Right: " + (data.right_diagnosis || "-");
+      } else if(data.eye_mode === "left"){
+        txt = (data.left_diagnosis || "-");
+      } else {
+        txt = (data.right_diagnosis || "-");
       }
 
       document.getElementById("diagText").textContent = txt;
     }
 
     document.getElementById("resultBox").style.display="block";
-  }catch(e){
+  } catch(e){
     setStatus("scanStatus","Error: "+e.message,false);
   }
 }
@@ -349,38 +352,35 @@ async def scan_run(
         raise HTTPException(400, detail="eye_mode must be left/right/both")
 
     try:
+        # -------------------------
         # BOTH EYES
+        # -------------------------
         if eye_mode == "both":
             if left_file is None or right_file is None:
-                raise HTTPException(400, detail="left_file and right_file are required for both")
-
-            left_id = new_upload_id()
-            right_id = new_upload_id()
+                raise HTTPException(400, detail="left_file and right_file required")
 
             left_bytes = await left_file.read()
             right_bytes = await right_file.read()
 
+            # log: must be different
+            print(
+                "[SCAN BOTH]",
+                "L_len=", len(left_bytes),
+                "L_sha=", _sha256(left_bytes)[:12],
+                "R_len=", len(right_bytes),
+                "R_sha=", _sha256(right_bytes)[:12],
+            )
+
+            left_id = new_upload_id()
+            right_id = new_upload_id()
             left_key = key_for("left", left_id)
             right_key = key_for("right", right_id)
 
             put_bytes(left_key, left_bytes, left_file.content_type or "image/jpeg")
             put_bytes(right_key, right_bytes, right_file.content_type or "image/jpeg")
 
-            left_diag_raw = predict_diagnosis(left_bytes)
-            right_diag_raw = predict_diagnosis(right_bytes)
-
-            left_diag = _clean_diag(left_diag_raw)
-            right_diag = _clean_diag(right_diag_raw)
-
-            print(
-                "[SCAN BOTH]",
-                "L_len=", len(left_bytes),
-                "L_sha=", _sha256(left_bytes)[:12],
-                "L_diag=", left_diag_raw,
-                "R_len=", len(right_bytes),
-                "R_sha=", _sha256(right_bytes)[:12],
-                "R_diag=", right_diag_raw,
-            )
+            left_diag = _clean_diag(predict_diagnosis(left_bytes))
+            right_diag = _clean_diag(predict_diagnosis(right_bytes))
 
             scan = Scan(
                 user_id=user_id,
@@ -404,26 +404,26 @@ async def scan_run(
                 error=None,
             )
 
+        # -------------------------
         # SINGLE EYE
+        # -------------------------
         if file is None:
             raise HTTPException(400, detail="file is required for left/right")
 
-        upload_id = new_upload_id()
         image_bytes = await file.read()
-
-        r2_key = key_for(eye_mode, upload_id)
-        put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
-
-        diag_raw = predict_diagnosis(image_bytes)
-        diag = _clean_diag(diag_raw)
 
         print(
             "[SCAN ONE]",
             "mode=", eye_mode,
             "len=", len(image_bytes),
             "sha=", _sha256(image_bytes)[:12],
-            "diag=", diag_raw,
         )
+
+        upload_id = new_upload_id()
+        r2_key = key_for(eye_mode, upload_id)
+        put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
+
+        diag = _clean_diag(predict_diagnosis(image_bytes))
 
         scan = Scan(
             user_id=user_id,
