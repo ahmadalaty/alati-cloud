@@ -11,7 +11,6 @@ from .auth import hash_password, verify_password, create_token, require_user
 from .storage_r2 import new_upload_id, key_for, put_bytes, BUILD_MARKER as STORAGE_MARKER
 from .inference import predict_diagnosis, BUILD_MARKER as INF_MARKER, ACTIVE_VARIANT
 
-
 app = FastAPI(title="Alati Cloud Demo (No Worker)")
 Base.metadata.create_all(bind=engine)
 
@@ -20,22 +19,13 @@ Base.metadata.create_all(bind=engine)
 # Helpers
 # ----------------------------
 def diagnosis_to_text(diag):
-    """
-    Converts diagnosis output to clean string:
-      dict -> name
-      str  -> itself
-    e.g. {"code":"H","name":"hypertensive_retinopathy"} -> "hypertensive retinopathy"
-    """
     if diag is None:
         return None
-
     if isinstance(diag, dict):
         name = diag.get("name") or diag.get("label") or diag.get("diagnosis") or diag.get("code") or "unknown"
     else:
         name = str(diag)
-
-    name = name.replace("_", " ").strip()
-    return name
+    return name.replace("_", " ").strip()
 
 
 def upsert_admin():
@@ -111,22 +101,43 @@ def ui():
     .result{padding:14px;border-radius:14px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.12);margin-top:10px;}
     .big{font-size:18px;font-weight:800;}
     a{color:#9fb3ff;}
-    .divider{height:1px;background:rgba(255,255,255,.10);margin:10px 0;}
+
+    .tabs{display:flex;gap:10px;margin-top:10px;}
+    .tab{
+      flex:1;
+      padding:12px;
+      border-radius:12px;
+      text-align:center;
+      border:1px solid rgba(255,255,255,.14);
+      background:rgba(0,0,0,.25);
+      cursor:pointer;
+      font-weight:700;
+      user-select:none;
+    }
+    .tab.active{
+      background:#355dff;
+      border-color:#355dff;
+    }
+
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+    @media (max-width: 640px){
+      .grid2{grid-template-columns:1fr;}
+    }
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Alati Cloud Demo</h1>
-  <p class="sub">Login → choose eye → take photo OR upload → diagnosis only.</p>
+  <p class="sub">Login → choose eye → choose input mode → diagnosis only.</p>
 
-  <div class="card" id="loginCard">
+  <div class="card">
     <h3 style="margin:10px 0 8px;">1) Login</h3>
     <label>Email</label>
     <input id="email" placeholder="admin@alati.ai"/>
     <label>Password</label>
     <input id="password" type="password" placeholder="••••••••"/>
     <div style="height:10px"></div>
-    <button id="btnLogin" onclick="doLogin()">Login</button>
+    <button onclick="doLogin()">Login</button>
     <p id="loginStatus" class="muted"></p>
     <p class="muted">Debug: <a href="/debug" target="_blank">/debug</a></p>
   </div>
@@ -135,57 +146,118 @@ def ui():
     <h3 style="margin:0 0 8px;">2) Scan</h3>
 
     <label>Eye mode</label>
-    <select id="eyeMode" onchange="refreshInputs()">
-      <option value="left">Left eye</option>
-      <option value="right">Right eye</option>
-      <option value="both">Both eyes</option>
-    </select>
-
-    <!-- SINGLE -->
-    <div id="singleBox">
-      <label>Camera</label>
-      <input id="singleCam" type="file" accept="image/*" capture="environment" onchange="exclusive('singleCam','singleUpload')"/>
-      <div class="divider"></div>
-      <label>Upload</label>
-      <input id="singleUpload" type="file" accept="image/*" onchange="exclusive('singleUpload','singleCam')"/>
-      <p class="muted">When you pick camera, upload resets. When you upload, camera resets.</p>
+    <div class="tabs">
+      <div class="tab active" id="eye_left" onclick="setEyeMode('left')">Left</div>
+      <div class="tab" id="eye_right" onclick="setEyeMode('right')">Right</div>
+      <div class="tab" id="eye_both" onclick="setEyeMode('both')">Both</div>
     </div>
 
-    <!-- BOTH -->
+    <label style="margin-top:14px;">Input mode</label>
+    <div class="tabs">
+      <div class="tab active" id="input_capture" onclick="setInputMode('capture')">Capture</div>
+      <div class="tab" id="input_upload" onclick="setInputMode('upload')">Upload</div>
+    </div>
+
+    <div style="height:12px"></div>
+
+    <!-- Single file input -->
+    <div id="singleBox">
+      <label id="singleLabel">Image</label>
+      <input id="singleFile" type="file" accept="image/*" capture="environment"/>
+      <p class="muted" id="singleHint">Capture opens camera on mobile. Upload opens file picker.</p>
+    </div>
+
+    <!-- Both eyes input -->
     <div id="bothBox" style="display:none;">
-      <div class="row">
+      <div class="grid2">
         <div>
-          <label>Left (Camera)</label>
-          <input id="leftCam" type="file" accept="image/*" capture="environment" onchange="exclusive('leftCam','leftUpload')"/>
-          <div class="divider"></div>
-          <label>Left (Upload)</label>
-          <input id="leftUpload" type="file" accept="image/*" onchange="exclusive('leftUpload','leftCam')"/>
+          <label>Left image</label>
+          <input id="leftFile" type="file" accept="image/*" capture="environment"/>
         </div>
         <div>
-          <label>Right (Camera)</label>
-          <input id="rightCam" type="file" accept="image/*" capture="environment" onchange="exclusive('rightCam','rightUpload')"/>
-          <div class="divider"></div>
-          <label>Right (Upload)</label>
-          <input id="rightUpload" type="file" accept="image/*" onchange="exclusive('rightUpload','rightCam')"/>
+          <label>Right image</label>
+          <input id="rightFile" type="file" accept="image/*" capture="environment"/>
         </div>
       </div>
-      <p class="muted">Each eye: choose camera OR upload, not both.</p>
+      <p class="muted" id="bothHint">Choose capture or upload above.</p>
     </div>
 
     <div style="height:10px"></div>
-    <button id="btnRun" onclick="runScan()">Analyze</button>
+    <button onclick="runScan()">Analyze</button>
     <p id="scanStatus" class="muted"></p>
 
     <div class="result" id="resultBox" style="display:none;">
-      <div class="big" id="diagTitle">Diagnosis</div>
+      <div class="big">Diagnosis</div>
       <div id="diagText" style="margin-top:8px;white-space:pre-wrap;"></div>
     </div>
   </div>
-
 </div>
 
 <script>
 let TOKEN = null;
+let EYE_MODE = "left";
+let INPUT_MODE = "capture";
+
+function setTab(groupPrefix, value){
+  ["left","right","both","capture","upload"].forEach(v=>{
+    const el = document.getElementById(groupPrefix + "_" + v);
+    if(el) el.classList.remove("active");
+  });
+  const active = document.getElementById(groupPrefix + "_" + value);
+  if(active) active.classList.add("active");
+}
+
+function setEyeMode(mode){
+  EYE_MODE = mode;
+  setTab("eye", mode);
+  renderInputs();
+}
+
+function setInputMode(mode){
+  INPUT_MODE = mode;
+  setTab("input", mode);
+  renderInputs();
+}
+
+function renderInputs(){
+  const singleBox = document.getElementById("singleBox");
+  const bothBox = document.getElementById("bothBox");
+  const singleFile = document.getElementById("singleFile");
+  const leftFile = document.getElementById("leftFile");
+  const rightFile = document.getElementById("rightFile");
+
+  // Reset selected files when switching modes (prevents accidental reuse)
+  singleFile.value = "";
+  leftFile.value = "";
+  rightFile.value = "";
+
+  // Switch capture attribute
+  if(INPUT_MODE === "capture"){
+    singleFile.setAttribute("capture","environment");
+    leftFile.setAttribute("capture","environment");
+    rightFile.setAttribute("capture","environment");
+  }else{
+    singleFile.removeAttribute("capture");
+    leftFile.removeAttribute("capture");
+    rightFile.removeAttribute("capture");
+  }
+
+  // show correct input layout
+  if(EYE_MODE === "both"){
+    singleBox.style.display = "none";
+    bothBox.style.display = "block";
+  }else{
+    singleBox.style.display = "block";
+    bothBox.style.display = "none";
+    document.getElementById("singleLabel").textContent =
+      (EYE_MODE === "left" ? "Left image" : "Right image");
+  }
+
+  document.getElementById("singleHint").textContent =
+    INPUT_MODE === "capture"
+      ? "Capture opens the camera on mobile."
+      : "Upload opens file picker (camera still possible via phone gallery).";
+}
 
 function setStatus(id, msg, ok=null){
   const el = document.getElementById(id);
@@ -193,27 +265,6 @@ function setStatus(id, msg, ok=null){
   if(ok===true) el.className="muted ok";
   else if(ok===false) el.className="muted bad";
   else el.className="muted";
-}
-
-function refreshInputs(){
-  const mode = document.getElementById("eyeMode").value;
-  document.getElementById("singleBox").style.display = (mode==="both") ? "none" : "block";
-  document.getElementById("bothBox").style.display = (mode==="both") ? "block" : "none";
-}
-
-function exclusive(chosenId, otherId){
-  // when user selects one input, clear the other input
-  const chosen = document.getElementById(chosenId);
-  const other  = document.getElementById(otherId);
-  if (chosen.files && chosen.files.length > 0) {
-    other.value = ""; // clear other
-  }
-}
-
-function pickSingle(camId, upId){
-  const cam = document.getElementById(camId).files?.[0];
-  const up  = document.getElementById(upId).files?.[0];
-  return cam || up || null;
 }
 
 async function doLogin(){
@@ -233,6 +284,7 @@ async function doLogin(){
 
     setStatus("loginStatus","Login OK ✅",true);
     document.getElementById("scanCard").style.display="block";
+    renderInputs();
   }catch(e){
     TOKEN = null;
     setStatus("loginStatus","Login failed: "+e.message,false);
@@ -242,25 +294,18 @@ async function doLogin(){
 async function runScan(){
   if(!TOKEN){ setStatus("scanStatus","Please login first.",false); return; }
 
-  const mode = document.getElementById("eyeMode").value;
   const fd = new FormData();
-  fd.append("eye_mode", mode);
+  fd.append("eye_mode", EYE_MODE);
 
-  if(mode==="both"){
-    const lf = pickSingle("leftCam","leftUpload");
-    const rf = pickSingle("rightCam","rightUpload");
-    if(!lf || !rf){
-      setStatus("scanStatus","Please provide BOTH left and right images.",false);
-      return;
-    }
+  if(EYE_MODE === "both"){
+    const lf = document.getElementById("leftFile").files?.[0];
+    const rf = document.getElementById("rightFile").files?.[0];
+    if(!lf || !rf){ setStatus("scanStatus","Please provide BOTH images.",false); return; }
     fd.append("left_file", lf);
     fd.append("right_file", rf);
   }else{
-    const f = pickSingle("singleCam","singleUpload");
-    if(!f){
-      setStatus("scanStatus","Please provide an image.",false);
-      return;
-    }
+    const f = document.getElementById("singleFile").files?.[0];
+    if(!f){ setStatus("scanStatus","Please provide an image.",false); return; }
     fd.append("file", f);
   }
 
@@ -282,16 +327,14 @@ async function runScan(){
     }else{
       setStatus("scanStatus","Done ✅",true);
 
-      // show ONLY diagnosis text
       let txt = "";
       if(data.eye_mode === "both"){
-        txt = (data.left_diagnosis || "-") + "\\n" + (data.right_diagnosis || "-");
+        txt = "Left: " + (data.left_diagnosis || "-") + "\\nRight: " + (data.right_diagnosis || "-");
       }else if(data.eye_mode === "left"){
         txt = (data.left_diagnosis || "-");
       }else{
         txt = (data.right_diagnosis || "-");
       }
-
       document.getElementById("diagText").textContent = txt;
     }
 
@@ -307,7 +350,7 @@ async function runScan(){
 
 
 # ----------------------------
-# API Endpoints
+# API
 # ----------------------------
 @app.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
