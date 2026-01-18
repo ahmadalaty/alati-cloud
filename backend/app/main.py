@@ -21,20 +21,16 @@ Base.metadata.create_all(bind=engine)
 # ----------------------------
 def diagnosis_to_text(diag):
     """
-    Converts diagnosis output to a clean professional string.
-    Accepts:
-      - dict like {"code":"H","name":"hypertensive_retinopathy"}
-      - string like "hypertensive_retinopathy"
-    Returns:
-      - "hypertensive retinopathy"
+    Converts diagnosis output to clean string:
+      dict -> name
+      str  -> itself
+    e.g. {"code":"H","name":"hypertensive_retinopathy"} -> "hypertensive retinopathy"
     """
     if diag is None:
         return None
 
     if isinstance(diag, dict):
-        name = diag.get("name") or diag.get("label") or diag.get("diagnosis")
-        if not name:
-            name = diag.get("code") or "unknown"
+        name = diag.get("name") or diag.get("label") or diag.get("diagnosis") or diag.get("code") or "unknown"
     else:
         name = str(diag)
 
@@ -115,17 +111,15 @@ def ui():
     .result{padding:14px;border-radius:14px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.12);margin-top:10px;}
     .big{font-size:18px;font-weight:800;}
     a{color:#9fb3ff;}
-    .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);font-size:12px;opacity:.9;}
-    .divider{height:1px;background:rgba(255,255,255,.10);margin:12px 0;}
+    .divider{height:1px;background:rgba(255,255,255,.10);margin:10px 0;}
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Alati Cloud Demo</h1>
-  <p class="sub">Login → choose eye → take photo or upload → diagnosis only.</p>
+  <p class="sub">Login → choose eye → take photo OR upload → diagnosis only.</p>
 
   <div class="card" id="loginCard">
-    <div class="pill">No Worker (sync inference)</div>
     <h3 style="margin:10px 0 8px;">1) Login</h3>
     <label>Email</label>
     <input id="email" placeholder="admin@alati.ai"/>
@@ -147,37 +141,35 @@ def ui():
       <option value="both">Both eyes</option>
     </select>
 
-    <!-- SINGLE EYE -->
+    <!-- SINGLE -->
     <div id="singleBox">
-      <label>Take Photo</label>
-      <input id="singleCam" type="file" accept="image/*" capture="environment"/>
+      <label>Camera</label>
+      <input id="singleCam" type="file" accept="image/*" capture="environment" onchange="exclusive('singleCam','singleUpload')"/>
       <div class="divider"></div>
-      <label>Or Upload Image</label>
-      <input id="singleUpload" type="file" accept="image/*"/>
-      <p class="muted">Mobile: choose Camera or Upload. Desktop: file upload.</p>
+      <label>Upload</label>
+      <input id="singleUpload" type="file" accept="image/*" onchange="exclusive('singleUpload','singleCam')"/>
+      <p class="muted">When you pick camera, upload resets. When you upload, camera resets.</p>
     </div>
 
-    <!-- BOTH EYES -->
+    <!-- BOTH -->
     <div id="bothBox" style="display:none;">
       <div class="row">
         <div>
-          <label>Left Eye (Camera)</label>
-          <input id="leftCam" type="file" accept="image/*" capture="environment"/>
+          <label>Left (Camera)</label>
+          <input id="leftCam" type="file" accept="image/*" capture="environment" onchange="exclusive('leftCam','leftUpload')"/>
           <div class="divider"></div>
-          <label>Left Eye (Upload)</label>
-          <input id="leftUpload" type="file" accept="image/*"/>
+          <label>Left (Upload)</label>
+          <input id="leftUpload" type="file" accept="image/*" onchange="exclusive('leftUpload','leftCam')"/>
         </div>
-
         <div>
-          <label>Right Eye (Camera)</label>
-          <input id="rightCam" type="file" accept="image/*" capture="environment"/>
+          <label>Right (Camera)</label>
+          <input id="rightCam" type="file" accept="image/*" capture="environment" onchange="exclusive('rightCam','rightUpload')"/>
           <div class="divider"></div>
-          <label>Right Eye (Upload)</label>
-          <input id="rightUpload" type="file" accept="image/*"/>
+          <label>Right (Upload)</label>
+          <input id="rightUpload" type="file" accept="image/*" onchange="exclusive('rightUpload','rightCam')"/>
         </div>
       </div>
-
-      <p class="muted">Upload or capture for each eye.</p>
+      <p class="muted">Each eye: choose camera OR upload, not both.</p>
     </div>
 
     <div style="height:10px"></div>
@@ -209,10 +201,19 @@ function refreshInputs(){
   document.getElementById("bothBox").style.display = (mode==="both") ? "block" : "none";
 }
 
-function pickFile(camId, uploadId){
+function exclusive(chosenId, otherId){
+  // when user selects one input, clear the other input
+  const chosen = document.getElementById(chosenId);
+  const other  = document.getElementById(otherId);
+  if (chosen.files && chosen.files.length > 0) {
+    other.value = ""; // clear other
+  }
+}
+
+function pickSingle(camId, upId){
   const cam = document.getElementById(camId).files?.[0];
-  const up  = document.getElementById(uploadId).files?.[0];
-  return cam || up || null;   // prefer camera if both exist
+  const up  = document.getElementById(upId).files?.[0];
+  return cam || up || null;
 }
 
 async function doLogin(){
@@ -246,14 +247,20 @@ async function runScan(){
   fd.append("eye_mode", mode);
 
   if(mode==="both"){
-    const lf = pickFile("leftCam", "leftUpload");
-    const rf = pickFile("rightCam", "rightUpload");
-    if(!lf || !rf){ setStatus("scanStatus","Please provide BOTH left and right images (camera or upload).",false); return; }
+    const lf = pickSingle("leftCam","leftUpload");
+    const rf = pickSingle("rightCam","rightUpload");
+    if(!lf || !rf){
+      setStatus("scanStatus","Please provide BOTH left and right images.",false);
+      return;
+    }
     fd.append("left_file", lf);
     fd.append("right_file", rf);
   }else{
-    const f = pickFile("singleCam", "singleUpload");
-    if(!f){ setStatus("scanStatus","Please provide an image (camera or upload).",false); return; }
+    const f = pickSingle("singleCam","singleUpload");
+    if(!f){
+      setStatus("scanStatus","Please provide an image.",false);
+      return;
+    }
     fd.append("file", f);
   }
 
@@ -275,13 +282,14 @@ async function runScan(){
     }else{
       setStatus("scanStatus","Done ✅",true);
 
+      // show ONLY diagnosis text
       let txt = "";
       if(data.eye_mode === "both"){
-        txt = "Left: " + (data.left_diagnosis || "-") + "\\nRight: " + (data.right_diagnosis || "-");
+        txt = (data.left_diagnosis || "-") + "\\n" + (data.right_diagnosis || "-");
       }else if(data.eye_mode === "left"){
-        txt = "Left: " + (data.left_diagnosis || "-");
+        txt = (data.left_diagnosis || "-");
       }else{
-        txt = "Right: " + (data.right_diagnosis || "-");
+        txt = (data.right_diagnosis || "-");
       }
 
       document.getElementById("diagText").textContent = txt;
@@ -402,7 +410,6 @@ async def scan_run(
     except HTTPException:
         raise
     except Exception as e:
-        # Save failed scan
         scan = Scan(
             user_id=user_id,
             eye_mode=eye_mode,
@@ -413,11 +420,7 @@ async def scan_run(
         db.commit()
         db.refresh(scan)
 
-        # Hide internals unless DEBUG_ERRORS=1
-        if str(settings.DEBUG_ERRORS).strip() == "1":
-            detail = scan.error
-        else:
-            detail = "Scan failed"
+        detail = scan.error if str(settings.DEBUG_ERRORS).strip() == "1" else "Scan failed"
 
         return JSONResponse(
             status_code=500,
