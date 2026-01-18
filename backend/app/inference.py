@@ -26,6 +26,9 @@ if isinstance(labels_raw, dict):
 else:
     LABELS = list(labels_raw)
 
+# expected order (ODIR8) - for sanity check only
+ODIR_EXPECTED = ["N", "D", "G", "C", "A", "H", "M", "O"]
+
 LABEL_TO_NAME = {
     "N": "normal",
     "D": "diabetic retinopathy",
@@ -143,7 +146,6 @@ def predict_diagnosis(image_bytes: bytes) -> str:
     top_label = max(probs, key=probs.get)
     top_prob = probs[top_label]
 
-    # if low confidence
     if top_prob < 0.50:
         return "uncertain"
 
@@ -152,6 +154,7 @@ def predict_diagnosis(image_bytes: bytes) -> str:
 
 def predict_debug(image_bytes: bytes) -> dict:
     probs = _probs_from_bytes(image_bytes)
+
     if probs:
         top_label = max(probs, key=probs.get)
         top_prob = probs[top_label]
@@ -160,11 +163,15 @@ def predict_debug(image_bytes: bytes) -> dict:
 
     top3 = sorted(probs.items(), key=lambda kv: kv[1], reverse=True)[:3]
 
+    labels_ok = (LABELS == ODIR_EXPECTED)
+
     return {
         "build_marker": BUILD_MARKER,
         "active_variant": ACTIVE_VARIANT,
         "load_mode": LOAD_MODE,
         "labels": LABELS,
+        "labels_ok_odir_order": labels_ok,
+        "labels_expected_odir8": ODIR_EXPECTED,
         "top_label": top_label,
         "top_prob": top_prob,
         "top3": top3,

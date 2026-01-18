@@ -21,31 +21,35 @@ def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
-def diag_to_text(diag) -> str:
+def _clean_diag(diag) -> str:
     """
-    Guarantees diagnosis shown in UI is a clean professional text.
+    Ensure diagnosis shown on UI is ONLY a clean professional name.
     Handles:
-      - dict: {"code":"D","name":"diabetic_retinopathy"} -> "diabetic retinopathy"
-      - string: "Diabetic Retinopathy" -> "Diabetic Retinopathy"
-      - None -> "-"
+      - dict like {"code":"D","name":"diabetic_retinopathy"}
+      - string like "diabetic retinopathy"
     """
     if diag is None:
-        return "-"
+        return "uncertain"
 
-    # dict output
+    # if dict returned
     if isinstance(diag, dict):
-        name = (
-            diag.get("name")
-            or diag.get("diagnosis")
-            or diag.get("label")
-            or diag.get("code")
-        )
-        if not name:
-            return "-"
-        return str(name).replace("_", " ").strip()
+        diag = diag.get("name") or diag.get("code") or "uncertain"
 
-    # string output
-    return str(diag).replace("_", " ").strip()
+    # if still not string
+    if not isinstance(diag, str):
+        diag = str(diag)
+
+    diag = diag.strip()
+    if not diag:
+        return "uncertain"
+
+    # normalize
+    diag = diag.replace("_", " ").replace("-", " ").strip()
+
+    # polish to Title Case
+    diag = " ".join([w.capitalize() for w in diag.split()])
+
+    return diag
 
 
 def upsert_admin():
@@ -132,6 +136,7 @@ def ui():
     .tab{flex:1;padding:10px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.20);text-align:center;cursor:pointer;font-weight:800;}
     .tab.active{background:#355dff;border-color:#355dff;}
     .hint{opacity:.75;font-size:12px;margin-top:6px;}
+    .diag{white-space:pre-line;font-size:16px;font-weight:900;line-height:1.6;}
   </style>
 </head>
 <body>
@@ -192,7 +197,7 @@ def ui():
 
     <div class="result" id="resultBox" style="display:none;">
       <div class="big">Diagnosis</div>
-      <div id="diagText" style="margin-top:10px;font-size:16px;font-weight:900;"></div>
+      <div id="diagText" class="diag" style="margin-top:10px;"></div>
     </div>
   </div>
 
@@ -220,14 +225,17 @@ function setSource(src){
 function applyCapture(){
   const cap = (SOURCE==="camera") ? "environment" : "";
   const inputs = ["singleFile","leftFile","rightFile"];
+
   for(const id of inputs){
     const el = document.getElementById(id);
     if(!el) continue;
+
     if(SOURCE==="camera"){
       el.setAttribute("capture", cap);
     } else {
-      el.removeAttribute("capture"); // allow camera+upload chooser on phones
+      el.removeAttribute("capture"); // gives BOTH camera+upload choice on phones
     }
+
     el.value = "";
   }
 }
@@ -362,17 +370,20 @@ async def scan_run(
             put_bytes(left_key, left_bytes, left_file.content_type or "image/jpeg")
             put_bytes(right_key, right_bytes, right_file.content_type or "image/jpeg")
 
-            left_diag = diag_to_text(predict_diagnosis(left_bytes))
-            right_diag = diag_to_text(predict_diagnosis(right_bytes))
+            left_diag_raw = predict_diagnosis(left_bytes)
+            right_diag_raw = predict_diagnosis(right_bytes)
+
+            left_diag = _clean_diag(left_diag_raw)
+            right_diag = _clean_diag(right_diag_raw)
 
             print(
                 "[SCAN BOTH]",
                 "L_len=", len(left_bytes),
                 "L_sha=", _sha256(left_bytes)[:12],
-                "L_diag=", left_diag,
+                "L_diag=", left_diag_raw,
                 "R_len=", len(right_bytes),
                 "R_sha=", _sha256(right_bytes)[:12],
-                "R_diag=", right_diag,
+                "R_diag=", right_diag_raw,
             )
 
             scan = Scan(
@@ -407,14 +418,15 @@ async def scan_run(
         r2_key = key_for(eye_mode, upload_id)
         put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
 
-        diag = diag_to_text(predict_diagnosis(image_bytes))
+        diag_raw = predict_diagnosis(image_bytes)
+        diag = _clean_diag(diag_raw)
 
         print(
             "[SCAN ONE]",
             "mode=", eye_mode,
             "len=", len(image_bytes),
             "sha=", _sha256(image_bytes)[:12],
-            "diag=", diag,
+            "diag=", diag_raw,
         )
 
         scan = Scan(
