@@ -1,7 +1,4 @@
 import os
-import json
-from typing import Optional
-
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
@@ -11,43 +8,45 @@ from .db import Base, engine, get_db, SessionLocal
 from .models import User, Scan
 from .schemas import LoginRequest, TokenResponse, ScanResult
 from .auth import hash_password, verify_password, create_token, require_user
-
-# R2-only storage (your file: storage_r2.py)
 from .storage_r2 import new_upload_id, key_for, put_bytes, BUILD_MARKER as STORAGE_MARKER
+from .inference import predict_diagnosis, BUILD_MARKER as INF_MARKER, ACTIVE_VARIANT
 
-# Inference (your file: inference.py)
-from .inference import (
-    predict_diagnosis,
-    BUILD_MARKER as INF_MARKER,
-    ACTIVE_VARIANT,
-)
 
 app = FastAPI(title="Alati Cloud Demo (No Worker)")
 Base.metadata.create_all(bind=engine)
 
 
-# -----------------------------
+# ----------------------------
 # Helpers
-# -----------------------------
-def _make_json_safe(obj):
-    if obj is None or isinstance(obj, (str, int, float, bool)):
-        return obj
-    if isinstance(obj, dict):
-        return {str(k): _make_json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple, set)):
-        return [_make_json_safe(x) for x in obj]
-    return str(obj)
+# ----------------------------
+def diagnosis_to_text(diag):
+    """
+    Converts diagnosis output to a clean professional string.
+    Accepts:
+      - dict like {"code":"H","name":"hypertensive_retinopathy"}
+      - string like "hypertensive_retinopathy"
+    Returns:
+      - "hypertensive retinopathy"
+    """
+    if diag is None:
+        return None
+
+    if isinstance(diag, dict):
+        name = diag.get("name") or diag.get("label") or diag.get("diagnosis")
+        if not name:
+            name = diag.get("code") or "unknown"
+    else:
+        name = str(diag)
+
+    name = name.replace("_", " ").strip()
+    return name
 
 
 def upsert_admin():
-    """
-    Ensures there is an admin user based on OWNER_EMAIL/OWNER_PASSWORD.
-    """
     db = SessionLocal()
     try:
         email = (settings.OWNER_EMAIL or "").strip().lower()
         password = (settings.OWNER_PASSWORD or "").strip()
-
         if not email or not password:
             return
 
@@ -69,9 +68,6 @@ def startup():
     upsert_admin()
 
 
-# -----------------------------
-# Health / Debug
-# -----------------------------
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -79,26 +75,19 @@ def health():
 
 @app.get("/debug")
 def debug():
-    """
-    Keep this endpoint non-sensitive.
-    It confirms that the new code is running and that R2/model markers match.
-    """
     return {
-        "ok": True,
-        "demo_mode": str(settings.DEMO_MODE),
-        "debug_errors": str(settings.DEBUG_ERRORS),
-        "storage_mode": str(settings.STORAGE_MODE),
-        "r2_bucket_set": bool(getattr(settings, "R2_BUCKET", "")),
-        "model_variant_env": os.getenv("MODEL_VARIANT"),
-        "active_variant": ACTIVE_VARIANT,
+        "storage_mode": settings.STORAGE_MODE,
+        "model_variant": ACTIVE_VARIANT,
         "storage_marker": STORAGE_MARKER,
         "inference_marker": INF_MARKER,
+        "r2_bucket_set": bool(settings.R2_BUCKET),
+        "demo_mode": settings.DEMO_MODE,
     }
 
 
-# -----------------------------
-# UI (single page)
-# -----------------------------
+# ----------------------------
+# UI
+# ----------------------------
 @app.get("/", response_class=HTMLResponse)
 def ui():
     return """
@@ -127,12 +116,13 @@ def ui():
     .big{font-size:18px;font-weight:800;}
     a{color:#9fb3ff;}
     .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);font-size:12px;opacity:.9;}
+    .divider{height:1px;background:rgba(255,255,255,.10);margin:12px 0;}
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Alati Cloud Demo</h1>
-  <p class="sub">Login → choose eye → take photo / upload → diagnosis only.</p>
+  <p class="sub">Login → choose eye → take photo or upload → diagnosis only.</p>
 
   <div class="card" id="loginCard">
     <div class="pill">No Worker (sync inference)</div>
@@ -157,23 +147,37 @@ def ui():
       <option value="both">Both eyes</option>
     </select>
 
+    <!-- SINGLE EYE -->
     <div id="singleBox">
-      <label>Image (upload or camera)</label>
-      <input id="singleFile" type="file" accept="image/*" capture="environment"/>
-      <p class="muted">On mobile: this opens camera. On desktop: file picker.</p>
+      <label>Take Photo</label>
+      <input id="singleCam" type="file" accept="image/*" capture="environment"/>
+      <div class="divider"></div>
+      <label>Or Upload Image</label>
+      <input id="singleUpload" type="file" accept="image/*"/>
+      <p class="muted">Mobile: choose Camera or Upload. Desktop: file upload.</p>
     </div>
 
+    <!-- BOTH EYES -->
     <div id="bothBox" style="display:none;">
       <div class="row">
         <div>
-          <label>Left image</label>
-          <input id="leftFile" type="file" accept="image/*" capture="environment"/>
+          <label>Left Eye (Camera)</label>
+          <input id="leftCam" type="file" accept="image/*" capture="environment"/>
+          <div class="divider"></div>
+          <label>Left Eye (Upload)</label>
+          <input id="leftUpload" type="file" accept="image/*"/>
         </div>
+
         <div>
-          <label>Right image</label>
-          <input id="rightFile" type="file" accept="image/*" capture="environment"/>
+          <label>Right Eye (Camera)</label>
+          <input id="rightCam" type="file" accept="image/*" capture="environment"/>
+          <div class="divider"></div>
+          <label>Right Eye (Upload)</label>
+          <input id="rightUpload" type="file" accept="image/*"/>
         </div>
       </div>
+
+      <p class="muted">Upload or capture for each eye.</p>
     </div>
 
     <div style="height:10px"></div>
@@ -203,6 +207,12 @@ function refreshInputs(){
   const mode = document.getElementById("eyeMode").value;
   document.getElementById("singleBox").style.display = (mode==="both") ? "none" : "block";
   document.getElementById("bothBox").style.display = (mode==="both") ? "block" : "none";
+}
+
+function pickFile(camId, uploadId){
+  const cam = document.getElementById(camId).files?.[0];
+  const up  = document.getElementById(uploadId).files?.[0];
+  return cam || up || null;   // prefer camera if both exist
 }
 
 async function doLogin(){
@@ -236,14 +246,14 @@ async function runScan(){
   fd.append("eye_mode", mode);
 
   if(mode==="both"){
-    const lf = document.getElementById("leftFile").files?.[0];
-    const rf = document.getElementById("rightFile").files?.[0];
-    if(!lf || !rf){ setStatus("scanStatus","Please select both images.",false); return; }
+    const lf = pickFile("leftCam", "leftUpload");
+    const rf = pickFile("rightCam", "rightUpload");
+    if(!lf || !rf){ setStatus("scanStatus","Please provide BOTH left and right images (camera or upload).",false); return; }
     fd.append("left_file", lf);
     fd.append("right_file", rf);
   }else{
-    const f = document.getElementById("singleFile").files?.[0];
-    if(!f){ setStatus("scanStatus","Please select an image.",false); return; }
+    const f = pickFile("singleCam", "singleUpload");
+    if(!f){ setStatus("scanStatus","Please provide an image (camera or upload).",false); return; }
     fd.append("file", f);
   }
 
@@ -288,9 +298,9 @@ async function runScan(){
 """
 
 
-# -----------------------------
-# Auth
-# -----------------------------
+# ----------------------------
+# API Endpoints
+# ----------------------------
 @app.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
     email = (body.email or "").strip().lower()
@@ -300,30 +310,23 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     return {"access_token": create_token(user.id)}
 
 
-# -----------------------------
-# Scan (NO WORKER)
-# -----------------------------
 @app.post("/scan/run", response_model=ScanResult)
 async def scan_run(
     eye_mode: str = Form(...),
-    file: Optional[UploadFile] = File(None),
-    left_file: Optional[UploadFile] = File(None),
-    right_file: Optional[UploadFile] = File(None),
+    file: UploadFile | None = File(None),
+    left_file: UploadFile | None = File(None),
+    right_file: UploadFile | None = File(None),
     user_id: int = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    """
-    R2-only. No tmp paths. No celery.
-    Saves to DB + returns diagnosis only.
-    """
     eye_mode = (eye_mode or "").strip().lower()
     if eye_mode not in ("left", "right", "both"):
-        raise HTTPException(status_code=400, detail="eye_mode must be left/right/both")
+        raise HTTPException(400, detail="eye_mode must be left/right/both")
 
     try:
         if eye_mode == "both":
             if left_file is None or right_file is None:
-                raise HTTPException(status_code=400, detail="left_file and right_file are required for both")
+                raise HTTPException(400, detail="left_file and right_file are required for both")
 
             left_id = new_upload_id()
             right_id = new_upload_id()
@@ -337,8 +340,8 @@ async def scan_run(
             put_bytes(left_key, left_bytes, left_file.content_type or "image/jpeg")
             put_bytes(right_key, right_bytes, right_file.content_type or "image/jpeg")
 
-            left_diag = predict_diagnosis(left_bytes)
-            right_diag = predict_diagnosis(right_bytes)
+            left_diag = diagnosis_to_text(predict_diagnosis(left_bytes))
+            right_diag = diagnosis_to_text(predict_diagnosis(right_bytes))
 
             scan = Scan(
                 user_id=user_id,
@@ -348,7 +351,6 @@ async def scan_run(
                 left_diagnosis=left_diag,
                 right_diagnosis=right_diag,
                 status="done",
-                error=None,
             )
             db.add(scan)
             db.commit()
@@ -365,7 +367,7 @@ async def scan_run(
 
         # single eye
         if file is None:
-            raise HTTPException(status_code=400, detail="file is required for left/right")
+            raise HTTPException(400, detail="file is required for left/right")
 
         upload_id = new_upload_id()
         image_bytes = await file.read()
@@ -373,7 +375,7 @@ async def scan_run(
         r2_key = key_for(eye_mode, upload_id)
         put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
 
-        diag = predict_diagnosis(image_bytes)
+        diag = diagnosis_to_text(predict_diagnosis(image_bytes))
 
         scan = Scan(
             user_id=user_id,
@@ -383,7 +385,6 @@ async def scan_run(
             left_diagnosis=diag if eye_mode == "left" else None,
             right_diagnosis=diag if eye_mode == "right" else None,
             status="done",
-            error=None,
         )
         db.add(scan)
         db.commit()
@@ -401,31 +402,31 @@ async def scan_run(
     except HTTPException:
         raise
     except Exception as e:
-        # Persist failure
-        err = f"{type(e).__name__}: {str(e)}"
+        # Save failed scan
         scan = Scan(
             user_id=user_id,
             eye_mode=eye_mode,
             status="failed",
-            error=err,
+            error=f"{type(e).__name__}: {str(e)}",
         )
         db.add(scan)
         db.commit()
         db.refresh(scan)
 
         # Hide internals unless DEBUG_ERRORS=1
-        detail = err if str(settings.DEBUG_ERRORS).strip() == "1" else "Scan failed"
+        if str(settings.DEBUG_ERRORS).strip() == "1":
+            detail = scan.error
+        else:
+            detail = "Scan failed"
 
         return JSONResponse(
             status_code=500,
-            content=_make_json_safe(
-                {
-                    "id": scan.id,
-                    "eye_mode": scan.eye_mode,
-                    "left_diagnosis": None,
-                    "right_diagnosis": None,
-                    "status": scan.status,
-                    "error": detail,
-                }
-            ),
+            content={
+                "id": scan.id,
+                "eye_mode": scan.eye_mode,
+                "left_diagnosis": None,
+                "right_diagnosis": None,
+                "status": scan.status,
+                "error": detail,
+            },
         )
