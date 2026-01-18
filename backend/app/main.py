@@ -21,6 +21,33 @@ def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
+def diag_to_text(diag) -> str:
+    """
+    Guarantees diagnosis shown in UI is a clean professional text.
+    Handles:
+      - dict: {"code":"D","name":"diabetic_retinopathy"} -> "diabetic retinopathy"
+      - string: "Diabetic Retinopathy" -> "Diabetic Retinopathy"
+      - None -> "-"
+    """
+    if diag is None:
+        return "-"
+
+    # dict output
+    if isinstance(diag, dict):
+        name = (
+            diag.get("name")
+            or diag.get("diagnosis")
+            or diag.get("label")
+            or diag.get("code")
+        )
+        if not name:
+            return "-"
+        return str(name).replace("_", " ").strip()
+
+    # string output
+    return str(diag).replace("_", " ").strip()
+
+
 def upsert_admin():
     db = SessionLocal()
     try:
@@ -199,9 +226,9 @@ function applyCapture(){
     if(SOURCE==="camera"){
       el.setAttribute("capture", cap);
     } else {
-      el.removeAttribute("capture"); // this gives BOTH camera+upload chooser on phones
+      el.removeAttribute("capture"); // allow camera+upload chooser on phones
     }
-    el.value = ""; // force refresh selection
+    el.value = "";
   }
 }
 
@@ -335,8 +362,8 @@ async def scan_run(
             put_bytes(left_key, left_bytes, left_file.content_type or "image/jpeg")
             put_bytes(right_key, right_bytes, right_file.content_type or "image/jpeg")
 
-            left_diag = predict_diagnosis(left_bytes)
-            right_diag = predict_diagnosis(right_bytes)
+            left_diag = diag_to_text(predict_diagnosis(left_bytes))
+            right_diag = diag_to_text(predict_diagnosis(right_bytes))
 
             print(
                 "[SCAN BOTH]",
@@ -380,7 +407,7 @@ async def scan_run(
         r2_key = key_for(eye_mode, upload_id)
         put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
 
-        diag = predict_diagnosis(image_bytes)
+        diag = diag_to_text(predict_diagnosis(image_bytes))
 
         print(
             "[SCAN ONE]",

@@ -7,7 +7,7 @@ import torch
 import torchvision.transforms as T
 from PIL import Image
 
-BUILD_MARKER = "INFERENCE_V3_STRING_DIAG_ONLY_2026_01_18"
+BUILD_MARKER = "INFERENCE_V3_STRING_ONLY_2026_01_18"
 
 BASE_DIR = os.path.dirname(__file__)
 MODEL_DIR = os.path.join(BASE_DIR, "model_files")
@@ -15,27 +15,26 @@ MODEL_DIR = os.path.join(BASE_DIR, "model_files")
 LABELS_PATH = os.path.join(MODEL_DIR, "labels.json")
 
 with open(LABELS_PATH, "r", encoding="utf-8") as f:
-    _labels_raw = json.load(f)
+    labels_raw = json.load(f)
 
-if isinstance(_labels_raw, dict):
+# normalize labels
+if isinstance(labels_raw, dict):
     try:
-        LABELS = [_labels_raw[str(i)] for i in range(len(_labels_raw))]
+        LABELS = [labels_raw[str(i)] for i in range(len(labels_raw))]
     except Exception:
-        LABELS = list(_labels_raw.values())
+        LABELS = list(labels_raw.values())
 else:
-    LABELS = list(_labels_raw)
-
-ODIR_EXPECTED = ["N", "D", "G", "C", "A", "H", "M", "O"]
+    LABELS = list(labels_raw)
 
 LABEL_TO_NAME = {
-    "N": "Normal",
-    "D": "Diabetic Retinopathy",
-    "G": "Glaucoma",
-    "C": "Cataract",
-    "A": "AMD",
-    "H": "Hypertension",
-    "M": "Myopia",
-    "O": "Others",
+    "N": "normal",
+    "D": "diabetic retinopathy",
+    "G": "glaucoma",
+    "C": "cataract",
+    "A": "amd",
+    "H": "hypertensive retinopathy",
+    "M": "myopia",
+    "O": "other",
 }
 
 NUM_CLASSES = len(LABELS)
@@ -72,13 +71,11 @@ def load_model(model_variant: str) -> Tuple[torch.nn.Module, str, str]:
 
     if model_variant == "resnet50":
         from torchvision.models import resnet50
-
         model = resnet50(weights=None)
         weights_path = os.path.join(MODEL_DIR, "alati_dualeye_model_resnet50.pth")
         active = "resnet50"
     else:
         from torchvision.models import resnet18
-
         model = resnet18(weights=None)
         weights_path = os.path.join(MODEL_DIR, "alati_dualeye_model_resnet18.pth")
         active = "resnet18"
@@ -86,17 +83,17 @@ def load_model(model_variant: str) -> Tuple[torch.nn.Module, str, str]:
     model.fc = torch.nn.Linear(model.fc.in_features, NUM_CLASSES)
 
     if not os.path.exists(weights_path):
-        raise RuntimeError(f"Model weights file not found: {weights_path}")
+        raise RuntimeError(f"Model weights not found: {weights_path}")
 
     ckpt = torch.load(weights_path, map_location=DEVICE)
 
     if not isinstance(ckpt, dict):
         ckpt.eval()
-        return ckpt, active, "loaded_full_model_object"
+        return ckpt, active, "full_model"
 
     state = _extract_state_dict(ckpt)
     if state is None:
-        raise RuntimeError("Checkpoint format not understood (no state_dict found)")
+        raise RuntimeError("Checkpoint format not understood")
 
     state = _clean_state_dict(state)
 
@@ -111,13 +108,12 @@ def load_model(model_variant: str) -> Tuple[torch.nn.Module, str, str]:
     return model, active, load_mode
 
 
-TRANSFORM = T.Compose(
-    [
-        T.Resize((224, 224)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ]
-)
+TRANSFORM = T.Compose([
+    T.Resize((224, 224)),
+    T.ToTensor(),
+    T.Normalize(mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]),
+])
 
 MODEL, ACTIVE_VARIANT, LOAD_MODE = load_model(DEFAULT_VARIANT)
 
@@ -138,22 +134,20 @@ def _probs_from_bytes(image_bytes: bytes) -> Dict[str, float]:
 
 def predict_diagnosis(image_bytes: bytes) -> str:
     """
-    Returns ONLY a string:
-      e.g. "Cataract" / "Normal" / "Uncertain"
+    ALWAYS RETURNS STRING ONLY.
     """
     probs = _probs_from_bytes(image_bytes)
-
     if not probs:
-        return "Uncertain"
+        return "uncertain"
 
     top_label = max(probs, key=probs.get)
     top_prob = probs[top_label]
 
+    # if low confidence
     if top_prob < 0.50:
-        return "Uncertain"
+        return "uncertain"
 
-    # MUST return string
-    return str(LABEL_TO_NAME.get(top_label, str(top_label)))
+    return LABEL_TO_NAME.get(top_label, str(top_label))
 
 
 def predict_debug(image_bytes: bytes) -> dict:
@@ -171,7 +165,6 @@ def predict_debug(image_bytes: bytes) -> dict:
         "active_variant": ACTIVE_VARIANT,
         "load_mode": LOAD_MODE,
         "labels": LABELS,
-        "labels_expected_odir8": ODIR_EXPECTED,
         "top_label": top_label,
         "top_prob": top_prob,
         "top3": top3,
