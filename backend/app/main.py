@@ -1,8 +1,5 @@
 import os
-import json
 import hashlib
-from typing import Optional
-
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
@@ -12,54 +9,28 @@ from .db import Base, engine, get_db, SessionLocal
 from .models import User, Scan
 from .schemas import LoginRequest, TokenResponse, ScanResult
 from .auth import hash_password, verify_password, create_token, require_user
-
 from .storage_r2 import new_upload_id, key_for, put_bytes, BUILD_MARKER as STORAGE_MARKER
-from .inference import predict_diagnosis, BUILD_MARKER as INF_MARKER, ACTIVE_VARIANT
+from .inference import predict_diagnosis, predict_debug, BUILD_MARKER as INF_MARKER, ACTIVE_VARIANT
 
 
-app = FastAPI(title="Alati Cloud Demo (No Worker)")
+app = FastAPI(title="Alati Cloud Demo (No Worker, R2-only)")
 Base.metadata.create_all(bind=engine)
-
-
-# ----------------------------
-# Helpers
-# ----------------------------
-def _normalize_diag(diag) -> str:
-    """
-    Always return ONLY a diagnosis string.
-    Handles: dict {"code": "...", "name":"amd"} or plain string.
-    """
-    if diag is None:
-        return "other"
-
-    if isinstance(diag, dict):
-        name = diag.get("name") or diag.get("label") or diag.get("diagnosis")
-        if isinstance(name, str) and name.strip():
-            return name.strip()
-        return "other"
-
-    if isinstance(diag, str):
-        s = diag.strip()
-        return s if s else "other"
-
-    return "other"
 
 
 def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
-# ----------------------------
-# Seed admin
-# ----------------------------
 def upsert_admin():
     db = SessionLocal()
     try:
         email = (settings.OWNER_EMAIL or "").strip().lower()
         password = (settings.OWNER_PASSWORD or "").strip()
-
         if not email or not password:
             return
+
+        # passlib/bcrypt max 72 bytes
+        password = password[:72]
 
         user = db.query(User).filter(User.email == email).first()
         if not user:
@@ -92,13 +63,17 @@ def debug():
         "storage_marker": STORAGE_MARKER,
         "inference_marker": INF_MARKER,
         "r2_bucket_set": bool(settings.R2_BUCKET),
-        "demo_mode": settings.DEMO_MODE,
+        "demo_mode": getattr(settings, "DEMO_MODE", ""),
+        "labels_sanity": "Use /debug/inference for top3",
     }
 
 
-# ----------------------------
-# UI
-# ----------------------------
+@app.post("/debug/inference")
+async def debug_inference(file: UploadFile = File(...)):
+    image_bytes = await file.read()
+    return predict_debug(image_bytes)
+
+
 @app.get("/", response_class=HTMLResponse)
 def ui():
     return """
@@ -110,30 +85,32 @@ def ui():
   <title>Alati Demo</title>
   <style>
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#0b1020;color:#e8ecff;}
-    .wrap{max-width:760px;margin:0 auto;padding:28px 16px 48px;}
+    .wrap{max-width:820px;margin:0 auto;padding:28px 16px 48px;}
     .card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:16px;margin:14px 0;}
     h1{font-size:28px;margin:0 0 6px;}
     .sub{opacity:.85;margin:0 0 18px;}
     label{display:block;font-size:13px;opacity:.85;margin:10px 0 6px;}
     input,select,button{width:100%;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.25);color:#e8ecff;font-size:15px;}
-    button{cursor:pointer;background:#355dff;border:0;font-weight:700;}
+    button{cursor:pointer;background:#355dff;border:0;font-weight:800;}
     button:disabled{opacity:.6;cursor:not-allowed;}
     .row{display:flex;gap:12px;align-items:flex-end;}
     .row>div{flex:1;}
     .muted{opacity:.8;font-size:13px;}
-    .ok{color:#67ffb1;font-weight:700;}
-    .bad{color:#ff8a8a;font-weight:700;}
+    .ok{color:#67ffb1;font-weight:800;}
+    .bad{color:#ff8a8a;font-weight:800;}
     .result{padding:14px;border-radius:14px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.12);margin-top:10px;}
-    .big{font-size:18px;font-weight:800;}
+    .big{font-size:18px;font-weight:900;}
     a{color:#9fb3ff;}
-    .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);font-size:12px;margin-right:6px;cursor:pointer;}
-    .pill.active{background:#355dff;border-color:#355dff;}
+    .tabs{display:flex;gap:10px;margin-top:8px;}
+    .tab{flex:1;padding:10px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.20);text-align:center;cursor:pointer;font-weight:800;}
+    .tab.active{background:#355dff;border-color:#355dff;}
+    .hint{opacity:.75;font-size:12px;margin-top:6px;}
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Alati Cloud Demo</h1>
-  <p class="sub">Login → choose eye → upload/capture → diagnosis only.</p>
+  <p class="sub">Login → choose eye → choose Upload/Camera → diagnosis only.</p>
 
   <div class="card" id="loginCard">
     <h3 style="margin:0 0 8px;">1) Login</h3>
@@ -142,7 +119,7 @@ def ui():
     <label>Password</label>
     <input id="password" type="password" placeholder="••••••••"/>
     <div style="height:10px"></div>
-    <button id="btnLogin" onclick="doLogin()">Login</button>
+    <button onclick="doLogin()">Login</button>
     <p id="loginStatus" class="muted"></p>
     <p class="muted">Debug: <a href="/debug" target="_blank">/debug</a></p>
   </div>
@@ -157,16 +134,16 @@ def ui():
       <option value="both">Both eyes</option>
     </select>
 
-    <label>Input method</label>
-    <div>
-      <span class="pill active" id="pillUpload" onclick="setMethod('upload')">Upload</span>
-      <span class="pill" id="pillCamera" onclick="setMethod('camera')">Camera</span>
+    <label>Source</label>
+    <div class="tabs">
+      <div class="tab active" id="tabUpload" onclick="setSource('upload')">Upload</div>
+      <div class="tab" id="tabCamera" onclick="setSource('camera')">Camera</div>
     </div>
+    <div class="hint">Upload = pick photo. Camera = open camera capture.</div>
 
     <div id="singleBox">
       <label>Image</label>
       <input id="singleFile" type="file" accept="image/*"/>
-      <input id="singleCam" type="file" accept="image/*" capture="environment" style="display:none;"/>
     </div>
 
     <div id="bothBox" style="display:none;">
@@ -174,23 +151,21 @@ def ui():
         <div>
           <label>Left image</label>
           <input id="leftFile" type="file" accept="image/*"/>
-          <input id="leftCam" type="file" accept="image/*" capture="environment" style="display:none;"/>
         </div>
         <div>
           <label>Right image</label>
           <input id="rightFile" type="file" accept="image/*"/>
-          <input id="rightCam" type="file" accept="image/*" capture="environment" style="display:none;"/>
         </div>
       </div>
     </div>
 
     <div style="height:10px"></div>
-    <button id="btnRun" onclick="runScan()">Analyze</button>
+    <button onclick="runScan()">Analyze</button>
     <p id="scanStatus" class="muted"></p>
 
     <div class="result" id="resultBox" style="display:none;">
-      <div class="big" id="diagTitle">Diagnosis</div>
-      <div id="diagText" style="margin-top:8px;"></div>
+      <div class="big">Diagnosis</div>
+      <div id="diagText" style="margin-top:10px;font-size:16px;font-weight:900;"></div>
     </div>
   </div>
 
@@ -198,7 +173,7 @@ def ui():
 
 <script>
 let TOKEN = null;
-let METHOD = "upload";
+let SOURCE = "upload"; // upload | camera
 
 function setStatus(id, msg, ok=null){
   const el = document.getElementById(id);
@@ -208,32 +183,33 @@ function setStatus(id, msg, ok=null){
   else el.className="muted";
 }
 
-function setMethod(m){
-  METHOD = m;
-  document.getElementById("pillUpload").classList.toggle("active", m==="upload");
-  document.getElementById("pillCamera").classList.toggle("active", m==="camera");
-  refreshInputs();
+function setSource(src){
+  SOURCE = src;
+  document.getElementById("tabUpload").classList.toggle("active", src==="upload");
+  document.getElementById("tabCamera").classList.toggle("active", src==="camera");
+  applyCapture();
+}
+
+function applyCapture(){
+  const cap = (SOURCE==="camera") ? "environment" : "";
+  const inputs = ["singleFile","leftFile","rightFile"];
+  for(const id of inputs){
+    const el = document.getElementById(id);
+    if(!el) continue;
+    if(SOURCE==="camera"){
+      el.setAttribute("capture", cap);
+    } else {
+      el.removeAttribute("capture"); // this gives BOTH camera+upload chooser on phones
+    }
+    el.value = ""; // force refresh selection
+  }
 }
 
 function refreshInputs(){
   const mode = document.getElementById("eyeMode").value;
-  const both = (mode==="both");
-
-  document.getElementById("singleBox").style.display = both ? "none" : "block";
-  document.getElementById("bothBox").style.display = both ? "block" : "none";
-
-  // toggle between upload/camera inputs
-  const showCam = (METHOD === "camera");
-
-  // single
-  document.getElementById("singleFile").style.display = showCam ? "none" : "block";
-  document.getElementById("singleCam").style.display = showCam ? "block" : "none";
-
-  // both
-  document.getElementById("leftFile").style.display = showCam ? "none" : "block";
-  document.getElementById("leftCam").style.display = showCam ? "block" : "none";
-  document.getElementById("rightFile").style.display = showCam ? "none" : "block";
-  document.getElementById("rightCam").style.display = showCam ? "block" : "none";
+  document.getElementById("singleBox").style.display = (mode==="both") ? "none" : "block";
+  document.getElementById("bothBox").style.display = (mode==="both") ? "block" : "none";
+  applyCapture();
 }
 
 async function doLogin(){
@@ -268,13 +244,13 @@ async function runScan(){
   fd.append("eye_mode", mode);
 
   if(mode==="both"){
-    const lf = (METHOD==="camera") ? document.getElementById("leftCam").files?.[0] : document.getElementById("leftFile").files?.[0];
-    const rf = (METHOD==="camera") ? document.getElementById("rightCam").files?.[0] : document.getElementById("rightFile").files?.[0];
+    const lf = document.getElementById("leftFile").files?.[0];
+    const rf = document.getElementById("rightFile").files?.[0];
     if(!lf || !rf){ setStatus("scanStatus","Please select both images.",false); return; }
     fd.append("left_file", lf);
     fd.append("right_file", rf);
   }else{
-    const f = (METHOD==="camera") ? document.getElementById("singleCam").files?.[0] : document.getElementById("singleFile").files?.[0];
+    const f = document.getElementById("singleFile").files?.[0];
     if(!f){ setStatus("scanStatus","Please select an image.",false); return; }
     fd.append("file", f);
   }
@@ -320,9 +296,6 @@ async function runScan(){
 """
 
 
-# ----------------------------
-# Auth
-# ----------------------------
 @app.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
     email = (body.email or "").strip().lower()
@@ -332,9 +305,6 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     return {"access_token": create_token(user.id)}
 
 
-# ----------------------------
-# Scan endpoint (No Worker)
-# ----------------------------
 @app.post("/scan/run", response_model=ScanResult)
 async def scan_run(
     eye_mode: str = Form(...),
@@ -353,32 +323,30 @@ async def scan_run(
             if left_file is None or right_file is None:
                 raise HTTPException(400, detail="left_file and right_file are required for both")
 
+            left_id = new_upload_id()
+            right_id = new_upload_id()
+
             left_bytes = await left_file.read()
             right_bytes = await right_file.read()
 
-            if not left_bytes or len(left_bytes) < 1000:
-                raise HTTPException(400, detail="Left image invalid/empty")
-            if not right_bytes or len(right_bytes) < 1000:
-                raise HTTPException(400, detail="Right image invalid/empty")
-
-            left_id = new_upload_id()
-            right_id = new_upload_id()
             left_key = key_for("left", left_id)
             right_key = key_for("right", right_id)
 
             put_bytes(left_key, left_bytes, left_file.content_type or "image/jpeg")
             put_bytes(right_key, right_bytes, right_file.content_type or "image/jpeg")
 
-            # inference
-            left_diag_raw = predict_diagnosis(left_bytes)
-            right_diag_raw = predict_diagnosis(right_bytes)
+            left_diag = predict_diagnosis(left_bytes)
+            right_diag = predict_diagnosis(right_bytes)
 
-            left_diag = _normalize_diag(left_diag_raw)
-            right_diag = _normalize_diag(right_diag_raw)
-
-            # debug logging (server logs only)
-            print("[SCAN BOTH] left_len=", len(left_bytes), "left_sha=", _sha256(left_bytes)[:12], "left_diag=", left_diag)
-            print("[SCAN BOTH] right_len=", len(right_bytes), "right_sha=", _sha256(right_bytes)[:12], "right_diag=", right_diag)
+            print(
+                "[SCAN BOTH]",
+                "L_len=", len(left_bytes),
+                "L_sha=", _sha256(left_bytes)[:12],
+                "L_diag=", left_diag,
+                "R_len=", len(right_bytes),
+                "R_sha=", _sha256(right_bytes)[:12],
+                "R_diag=", right_diag,
+            )
 
             scan = Scan(
                 user_id=user_id,
@@ -406,18 +374,21 @@ async def scan_run(
         if file is None:
             raise HTTPException(400, detail="file is required for left/right")
 
-        image_bytes = await file.read()
-        if not image_bytes or len(image_bytes) < 1000:
-            raise HTTPException(400, detail="Image invalid/empty")
-
         upload_id = new_upload_id()
+        image_bytes = await file.read()
+
         r2_key = key_for(eye_mode, upload_id)
         put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
 
-        diag_raw = predict_diagnosis(image_bytes)
-        diag = _normalize_diag(diag_raw)
+        diag = predict_diagnosis(image_bytes)
 
-        print("[SCAN ONE] mode=", eye_mode, "len=", len(image_bytes), "sha=", _sha256(image_bytes)[:12], "diag=", diag)
+        print(
+            "[SCAN ONE]",
+            "mode=", eye_mode,
+            "len=", len(image_bytes),
+            "sha=", _sha256(image_bytes)[:12],
+            "diag=", diag,
+        )
 
         scan = Scan(
             user_id=user_id,
@@ -454,7 +425,8 @@ async def scan_run(
         db.commit()
         db.refresh(scan)
 
-        detail = scan.error if str(settings.DEBUG_ERRORS).strip() == "1" else "Scan failed"
+        detail = scan.error if str(getattr(settings, "DEBUG_ERRORS", "")).strip() == "1" else "Scan failed"
+
         return JSONResponse(
             status_code=500,
             content={
