@@ -1,28 +1,25 @@
-# ---- Critical Fix ----
-numpy<2
-
-# ---- Web ----
 fastapi==0.110.0
 uvicorn[standard]==0.27.1
+
 python-multipart==0.0.9
 
-# ---- Auth ----
+SQLAlchemy==2.0.30
+psycopg[binary]==3.1.19
+
 passlib[bcrypt]==1.7.4
-python-jose[cryptography]==3.3.0
+python-jose==3.3.0
 
-# ---- DB ----
-SQLAlchemy==2.0.27
-psycopg[binary]==3.1.18
+pydantic==2.7.4
+pydantic-settings==2.3.4
 
-# ---- Storage (R2/S3) ----
-boto3==1.34.50
-botocore==1.34.50
+boto3==1.34.131
+botocore==1.34.131
 
-# ---- AI ----
-torch==2.2.1
-torchvision==0.17.1
-pillow==10.2.0
+Pillow==10.4.0
 
-# ---- Settings ----
-python-dotenv==1.0.1
-pydantic-settings==2.2.1
+# CRITICAL for torch compatibility in Render:
+numpy<2
+
+# Torch stack (CPU is OK for Render starter plan)
+torch==2.2.2
+torchvision==0.17.2
