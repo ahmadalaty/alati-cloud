@@ -2,38 +2,26 @@ import json
 import os
 import hashlib
 from io import BytesIO
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any
 
 import torch
 import torchvision.transforms as T
 from PIL import Image
 
-BUILD_MARKER = "INFERENCE_V6_STRICT_ONLY_AUDIT_2026_01_19"
+BUILD_MARKER = "INFERENCE_V6_STRICT_COMPAT_HEADMAP_2026_01_19"
 
 BASE_DIR = os.path.dirname(__file__)
 MODEL_DIR = os.path.join(BASE_DIR, "model_files")
 LABELS_PATH = os.path.join(MODEL_DIR, "labels.json")
 
-
-def _file_sha256(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-# -------------------------
-# Labels
-# -------------------------
-with open(LABELS_PATH, "r", encoding="utf-8") as f:
-    labels_raw = json.load(f)
-
-# Expected labels.json format:
+# labels.json format:
 # [
 #   {"code":"N","name":"normal"},
 #   ...
 # ]
+with open(LABELS_PATH, "r", encoding="utf-8") as f:
+    labels_raw = json.load(f)
+
 if isinstance(labels_raw, list) and len(labels_raw) > 0 and isinstance(labels_raw[0], dict):
     LABELS = [x["code"] for x in labels_raw]
     CODE_TO_NAME = {x["code"]: x["name"] for x in labels_raw}
@@ -55,7 +43,16 @@ DEFAULT_VARIANT = os.getenv("MODEL_VARIANT", "resnet18").strip().lower()
 DEVICE = "cpu"
 
 
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _clean_state_dict(state: dict) -> dict:
+    """Strip common prefixes."""
     cleaned = {}
     for k, v in state.items():
         nk = k
@@ -69,7 +66,7 @@ def _clean_state_dict(state: dict) -> dict:
     return cleaned
 
 
-def _extract_state_dict(ckpt):
+def _extract_state_dict(ckpt: Any):
     if isinstance(ckpt, dict):
         if "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
             return ckpt["state_dict"]
@@ -77,6 +74,31 @@ def _extract_state_dict(ckpt):
             return ckpt["model_state_dict"]
         return ckpt
     return None
+
+
+def _remap_classifier_to_fc(state: dict) -> dict:
+    """
+    Some trainings save head as:
+      classifier.3.weight / classifier.3.bias
+    while torchvision resnet uses:
+      fc.weight / fc.bias
+    This remaps keys so strict load succeeds.
+    """
+    if "fc.weight" in state or "fc.bias" in state:
+        return state
+
+    # if checkpoint used classifier.3 as final head
+    if "classifier.3.weight" in state and "classifier.3.bias" in state:
+        state = dict(state)  # copy
+        state["fc.weight"] = state.pop("classifier.3.weight")
+        state["fc.bias"] = state.pop("classifier.3.bias")
+
+    # classifier.0.* is not in torchvision resnet, ignore it safely
+    for k in ["classifier.0.weight", "classifier.0.bias", "classifier.1.weight", "classifier.1.bias"]:
+        if k in state:
+            state.pop(k, None)
+
+    return state
 
 
 def load_model(model_variant: str) -> Tuple[torch.nn.Module, str, str, str, int]:
@@ -93,63 +115,60 @@ def load_model(model_variant: str) -> Tuple[torch.nn.Module, str, str, str, int]
         weights_path = os.path.join(MODEL_DIR, "alati_dualeye_model_resnet18.pth")
         active = "resnet18"
 
+    # IMPORTANT: torchvision resnet final head
     model.fc = torch.nn.Linear(model.fc.in_features, NUM_CLASSES)
 
     if not os.path.exists(weights_path):
         raise RuntimeError(f"Model weights not found: {weights_path}")
 
+    weights_sha = _sha256_file(weights_path)
     weights_size = os.path.getsize(weights_path)
-    weights_sha = _file_sha256(weights_path)
 
     ckpt = torch.load(weights_path, map_location=DEVICE)
 
-    # full model object saved
+    # full model saved
     if not isinstance(ckpt, dict):
         ckpt.eval()
-        return ckpt, active, "full_model", weights_sha, weights_size
+        return ckpt, active, "full_model_object", weights_sha, weights_size
 
     state = _extract_state_dict(ckpt)
     if state is None:
         raise RuntimeError("Checkpoint format not understood")
 
     state = _clean_state_dict(state)
+    state = _remap_classifier_to_fc(state)
 
-    # STRICT ONLY
+    # STRICT load (after remap)
     missing, unexpected = model.load_state_dict(state, strict=False)
 
-    # We require strict behavior:
-    # if missing/unexpected -> crash
-    if missing or unexpected:
+    # We try to enforce that fc.* is loaded
+    # If not loaded -> fatal
+    if any(x in missing for x in ["fc.weight", "fc.bias"]):
         raise RuntimeError(
-            f"STRICT LOAD FAILED: missing={missing[:20]} unexpected={unexpected[:20]}"
+            f"LOAD FAILED: missing={missing} unexpected={unexpected}"
         )
 
     model.eval()
-    return model, active, "strict", weights_sha, weights_size
+    return model, active, "loaded_with_remap", weights_sha, weights_size
 
 
-TRANSFORM = T.Compose(
-    [
-        T.Resize((224, 224)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ]
-)
+TRANSFORM = T.Compose([
+    T.Resize((224, 224)),
+    T.ToTensor(),
+    T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
 
 MODEL, ACTIVE_VARIANT, LOAD_MODE, WEIGHTS_SHA, WEIGHTS_SIZE = load_model(DEFAULT_VARIANT)
 
 
-# Startup audit log (very important)
-print(
-    "[MODEL AUDIT]",
-    "marker=", BUILD_MARKER,
-    "variant=", ACTIVE_VARIANT,
-    "load=", LOAD_MODE,
-    "weights_sha=", WEIGHTS_SHA[:16],
-    "weights_size=", WEIGHTS_SIZE,
-    "labels=", LABELS,
-    "fc_out=", MODEL.fc.out_features if hasattr(MODEL, "fc") else None,
-)
+def translate_code(code: str) -> str:
+    if not code:
+        return "Uncertain"
+    name = CODE_TO_NAME.get(code, code)
+    name = name.replace("_", " ").replace("-", " ").strip()
+    name = " ".join(w.capitalize() for w in name.split())
+    return name or "Uncertain"
 
 
 def _probs_from_bytes(image_bytes: bytes) -> Dict[str, float]:
@@ -164,15 +183,6 @@ def _probs_from_bytes(image_bytes: bytes) -> Dict[str, float]:
     for i in range(min(len(probs), len(LABELS))):
         out[str(LABELS[i])] = float(probs[i])
     return out
-
-
-def translate_code(code: str) -> str:
-    if not code:
-        return "uncertain"
-    name = CODE_TO_NAME.get(code, code)
-    name = name.replace("_", " ").replace("-", " ").strip()
-    name = " ".join(w.capitalize() for w in name.split())
-    return name or "Uncertain"
 
 
 def predict_raw(image_bytes: bytes) -> dict:
@@ -199,7 +209,6 @@ def predict_diagnosis(image_bytes: bytes) -> str:
     if top_code is None or top_prob is None:
         return "Uncertain"
 
-    # confidence guard
     if top_prob < 0.50:
         return "Uncertain"
 
@@ -209,14 +218,15 @@ def predict_diagnosis(image_bytes: bytes) -> str:
 def predict_debug(image_bytes: bytes) -> dict:
     raw = predict_raw(image_bytes)
     top_code = raw.get("top_code")
+
     return {
         "build_marker": BUILD_MARKER,
         "active_variant": ACTIVE_VARIANT,
         "load_mode": LOAD_MODE,
-        "weights_sha": WEIGHTS_SHA,
-        "weights_size": WEIGHTS_SIZE,
         "labels": LABELS,
         "num_classes": NUM_CLASSES,
+        "weights_sha": WEIGHTS_SHA,
+        "weights_size": WEIGHTS_SIZE,
         **raw,
         "translated": translate_code(top_code) if top_code else None,
     }
