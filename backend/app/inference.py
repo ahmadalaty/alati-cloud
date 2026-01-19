@@ -1,5 +1,5 @@
-import os
 import json
+import os
 import hashlib
 from io import BytesIO
 from typing import Dict, Tuple, List
@@ -8,23 +8,21 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from torchvision import models
-from PIL import Image, ImageOps
+from PIL import Image
 
-BUILD_MARKER = "INFERENCE_V6_DUALEYE_MATCH_TRAINING_MIRROR_SINGLE_2026_01_19"
+BUILD_MARKER = "INFERENCE_FINAL_DUALEYE_MATCH_TRAIN_NORMAL_SUPPRESS_2026_01_19"
 
 BASE_DIR = os.path.dirname(__file__)
 MODEL_DIR = os.path.join(BASE_DIR, "model_files")
+
 LABELS_PATH = os.path.join(MODEL_DIR, "labels.json")
 
-
-# -----------------------------
-# Labels
 # labels.json format:
 # [
 #   {"code":"N","name":"normal"},
+#   {"code":"D","name":"diabetic_retinopathy"},
 #   ...
 # ]
-# -----------------------------
 with open(LABELS_PATH, "r", encoding="utf-8") as f:
     labels_raw = json.load(f)
 
@@ -32,7 +30,6 @@ if isinstance(labels_raw, list) and len(labels_raw) > 0 and isinstance(labels_ra
     LABELS: List[str] = [x["code"] for x in labels_raw]
     CODE_TO_NAME = {x["code"]: x["name"] for x in labels_raw}
 else:
-    # fallback
     LABELS = list(labels_raw)
     CODE_TO_NAME = {
         "N": "normal",
@@ -49,53 +46,48 @@ NUM_CLASSES = len(LABELS)
 DEFAULT_VARIANT = os.getenv("MODEL_VARIANT", "resnet18").strip().lower()
 DEVICE = "cpu"
 
+# Thresholds (tunable)
+N_THRESH = float(os.getenv("N_THRESH", "0.70"))                    # Normal strong
+DISEASE_BLOCK_THRESH = float(os.getenv("DISEASE_BLOCK", "0.35"))   # Any disease above this blocks Normal
+DISEASE_MIN_THRESH = float(os.getenv("DISEASE_MIN", "0.50"))       # Disease must be >= this to output disease
+MIRROR_TTA = str(os.getenv("MIRROR_TTA", "1")).strip() == "1"       # mirror augmentation on/off
 
-def _sha256(b: bytes) -> str:
+
+def _sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
-def _sha256_file(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def translate_code(code: str) -> str:
-    """
-    Translate ODIR code to UI-friendly label.
-    Returns Title Case string.
-    """
-    if not code:
+def _polish_name(name: str) -> str:
+    if not name:
         return "Uncertain"
-    name = CODE_TO_NAME.get(code, code)
-    name = str(name).replace("_", " ").replace("-", " ").strip()
+    name = name.replace("_", " ").replace("-", " ").strip()
     name = " ".join(w.capitalize() for w in name.split())
     return name or "Uncertain"
 
 
-# -----------------------------
-# DualEye Model (MATCH TRAINING)
-# -----------------------------
-class DualEyeModel(nn.Module):
-    def __init__(self, backbone_name: str, num_classes: int = 8):
-        super().__init__()
-        self.backbone_name = backbone_name
+def translate_code(code: str) -> str:
+    if not code:
+        return "Uncertain"
+    return _polish_name(CODE_TO_NAME.get(code, code))
 
+
+class DualEyeModel(nn.Module):
+    """
+    MUST MATCH TRAINING EXACTLY.
+    """
+    def __init__(self, num_classes=8, backbone_name="resnet18"):
+        super().__init__()
         if backbone_name == "resnet50":
             self.backbone = models.resnet50(weights=None)
-            out_dim = 2048
+            out_features = 2048
         else:
             self.backbone = models.resnet18(weights=None)
-            out_dim = 512
+            out_features = 512
 
-        # remove classifier head from backbone
         self.backbone.fc = nn.Identity()
 
-        # classifier exactly like your train.py
         self.classifier = nn.Sequential(
-            nn.Linear(out_dim * 2, 256),
+            nn.Linear(out_features * 2, 256),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(256, num_classes),
@@ -109,39 +101,17 @@ class DualEyeModel(nn.Module):
         return self.classifier(combined)
 
 
-# -----------------------------
-# Image transforms (cloud)
-# Must match inference pipeline stable
-# -----------------------------
 TRANSFORM = T.Compose(
     [
         T.Resize((224, 224)),
         T.ToTensor(),
+        # (training did not normalize, so DON'T add normalization!)
     ]
 )
 
 
-def _preprocess(image_bytes: bytes) -> torch.Tensor:
-    img = Image.open(BytesIO(image_bytes)).convert("RGB")
-    x = TRANSFORM(img).unsqueeze(0)
-    return x
-
-
-def _mirror_bytes(image_bytes: bytes) -> bytes:
-    """
-    Mirror flip to simulate the other eye.
-    Keeps distribution closer to training (dual-eye).
-    """
-    img = Image.open(BytesIO(image_bytes)).convert("RGB")
-    mirrored = ImageOps.mirror(img)
-    out = BytesIO()
-    mirrored.save(out, format="JPEG", quality=95)
-    return out.getvalue()
-
-
-def load_model(model_variant: str) -> Tuple[nn.Module, str, str, str, int]:
+def load_model(model_variant: str):
     model_variant = (model_variant or "resnet18").strip().lower()
-
     if model_variant == "resnet50":
         weights_path = os.path.join(MODEL_DIR, "alati_dualeye_model_resnet50.pth")
         active = "resnet50"
@@ -152,112 +122,144 @@ def load_model(model_variant: str) -> Tuple[nn.Module, str, str, str, int]:
     if not os.path.exists(weights_path):
         raise RuntimeError(f"Model weights not found: {weights_path}")
 
-    model = DualEyeModel(active, num_classes=NUM_CLASSES).to(DEVICE)
+    weights_size = os.path.getsize(weights_path)
+    weights_sha = _sha256_bytes(open(weights_path, "rb").read())
 
-    ckpt = torch.load(weights_path, map_location=DEVICE)
-    if not isinstance(ckpt, dict):
-        # someone saved entire model object
-        ckpt.eval()
-        return ckpt, active, "full_model", _sha256_file(weights_path), os.path.getsize(weights_path)
+    model = DualEyeModel(num_classes=NUM_CLASSES, backbone_name=active).to(DEVICE)
+    state = torch.load(weights_path, map_location=DEVICE)
 
-    # standard: state_dict
-    try:
-        model.load_state_dict(ckpt, strict=True)
-        load_mode = "strict"
-    except Exception:
-        # allow minor mismatch if keys have prefix
-        cleaned = {}
-        for k, v in ckpt.items():
-            nk = k
-            if nk.startswith("module."):
-                nk = nk[len("module.") :]
-            cleaned[nk] = v
-        model.load_state_dict(cleaned, strict=True)
-        load_mode = "strict_cleaned"
-
+    # strict True because architecture now matches training
+    model.load_state_dict(state, strict=True)
     model.eval()
-    return model, active, load_mode, _sha256_file(weights_path), os.path.getsize(weights_path)
+    return model, active, "strict", weights_sha, weights_size
 
 
 MODEL, ACTIVE_VARIANT, LOAD_MODE, WEIGHTS_SHA, WEIGHTS_SIZE = load_model(DEFAULT_VARIANT)
 
 
-def predict_raw_dual(left_bytes: bytes, right_bytes: bytes) -> dict:
+def _tensor_from_bytes(image_bytes: bytes) -> torch.Tensor:
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    x = TRANSFORM(img).unsqueeze(0)  # [1,3,224,224]
+    return x
+
+
+def _avg_probs(a: Dict[str, float], b: Dict[str, float]) -> Dict[str, float]:
+    out = {}
+    keys = set(a.keys()) | set(b.keys())
+    for k in keys:
+        out[k] = float((a.get(k, 0.0) + b.get(k, 0.0)) / 2.0)
+    return out
+
+
+def _probs_from_bytes_single(image_bytes: bytes) -> Dict[str, float]:
     """
-    Dual-eye inference (true trained path).
-    Returns: {top_code, top_prob, top3}
+    Single-eye inference by duplicating the same image as left and right.
+    This matches training format (DualEyeModel expects 2 inputs).
     """
-    left_x = _preprocess(left_bytes).to(DEVICE)
-    right_x = _preprocess(right_bytes).to(DEVICE)
+    x = _tensor_from_bytes(image_bytes)
 
     with torch.no_grad():
-        out = MODEL(left_x, right_x)  # shape [1, 8]
-        probs = out[0].detach().cpu().tolist()
+        probs = MODEL(x, x)[0].detach().cpu().tolist()  # already sigmoid in model
 
-    probs_map = {}
+    out = {}
     for i in range(min(len(probs), len(LABELS))):
-        probs_map[LABELS[i]] = float(probs[i])
+        out[LABELS[i]] = float(probs[i])
+    return out
 
-    top_code = max(probs_map, key=probs_map.get)
-    top_prob = probs_map[top_code]
-    top3 = sorted(probs_map.items(), key=lambda kv: kv[1], reverse=True)[:3]
+
+def _mirror_bytes(image_bytes: bytes) -> bytes:
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    img = img.transpose(Image.FLIP_LEFT_RIGHT)
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    return buf.getvalue()
+
+
+def probs_from_bytes(image_bytes: bytes) -> Dict[str, float]:
+    """
+    Returns probabilities with optional Mirror TTA.
+    """
+    p1 = _probs_from_bytes_single(image_bytes)
+
+    if not MIRROR_TTA:
+        return p1
+
+    flipped = _mirror_bytes(image_bytes)
+    p2 = _probs_from_bytes_single(flipped)
+    return _avg_probs(p1, p2)
+
+
+def choose_final_code(probs: Dict[str, float]) -> Tuple[str, str]:
+    """
+    Multi-label rule:
+    - Normal only if strong and no disease is significant.
+    - Otherwise take best disease if confident.
+    """
+    n_prob = float(probs.get("N", 0.0))
+
+    disease_codes = [c for c in LABELS if c != "N"]
+    if not disease_codes:
+        return "UNCERTAIN", "No disease labels loaded"
+
+    best_disease = max(disease_codes, key=lambda c: probs.get(c, 0.0))
+    disease_max = float(probs.get(best_disease, 0.0))
+
+    # ✅ Normal allowed only if all diseases low
+    if n_prob >= N_THRESH and disease_max < DISEASE_BLOCK_THRESH:
+        return "N", f"Normal allowed: N={n_prob:.3f} disease_max={disease_max:.3f}"
+
+    # ✅ Disease chosen if high enough
+    if disease_max >= DISEASE_MIN_THRESH:
+        return best_disease, f"Disease chosen: {best_disease}={disease_max:.3f} N={n_prob:.3f}"
+
+    return "UNCERTAIN", f"Uncertain: N={n_prob:.3f} disease_max={disease_max:.3f}"
+
+
+def predict_raw(image_bytes: bytes) -> dict:
+    probs = probs_from_bytes(image_bytes)
+
+    if probs:
+        top_code = max(probs, key=probs.get)
+        top_prob = float(probs[top_code])
+    else:
+        top_code, top_prob = None, None
+
+    top3 = sorted(probs.items(), key=lambda kv: kv[1], reverse=True)[:3]
+
+    final_code, reason = choose_final_code(probs)
+    translated = translate_code(final_code) if final_code != "UNCERTAIN" else "Uncertain"
 
     return {
         "top_code": top_code,
-        "top_prob": float(top_prob),
+        "top_prob": top_prob,
         "top3": [(k, float(v)) for k, v in top3],
+        "final_code": final_code,
+        "final_reason": reason,
+        "translated": translated,
+        "probs": probs,  # keep for debugging only
     }
 
 
-def predict_single(image_bytes: bytes, eye_mode: str) -> dict:
-    """
-    Single-eye inference using mirror flip to produce pseudo dual-eye.
-    eye_mode: left | right
-    """
-    eye_mode = (eye_mode or "left").strip().lower()
-    mirrored = _mirror_bytes(image_bytes)
-
-    if eye_mode == "right":
-        # right = original, left = mirrored
-        left_bytes = mirrored
-        right_bytes = image_bytes
-    else:
-        # left = original, right = mirrored
-        left_bytes = image_bytes
-        right_bytes = mirrored
-
-    return predict_raw_dual(left_bytes, right_bytes)
+def predict_diagnosis(image_bytes: bytes) -> str:
+    raw = predict_raw(image_bytes)
+    return raw["translated"]
 
 
-def predict_diagnosis(image_bytes: bytes, eye_mode: str = "left") -> str:
-    """
-    Always returns polished diagnosis string (no dict).
-    """
-    raw = predict_single(image_bytes, eye_mode)
-    top_code = raw.get("top_code")
-    top_prob = raw.get("top_prob")
-
-    if not top_code or top_prob is None:
-        return "Uncertain"
-
-    # confidence guard
-    if float(top_prob) < 0.50:
-        return "Uncertain"
-
-    return translate_code(top_code)
-
-
-def predict_debug(image_bytes: bytes, eye_mode: str = "left") -> dict:
-    raw = predict_single(image_bytes, eye_mode)
+def predict_debug(image_bytes: bytes) -> dict:
+    raw = predict_raw(image_bytes)
     return {
         "build_marker": BUILD_MARKER,
         "active_variant": ACTIVE_VARIANT,
         "load_mode": LOAD_MODE,
-        "weights_sha256": WEIGHTS_SHA,
+        "weights_sha": WEIGHTS_SHA,
         "weights_size": WEIGHTS_SIZE,
         "labels": LABELS,
         "num_classes": NUM_CLASSES,
-        "eye_mode": eye_mode,
+        "mirror_tta": MIRROR_TTA,
+        "thresholds": {
+            "N_THRESH": N_THRESH,
+            "DISEASE_BLOCK_THRESH": DISEASE_BLOCK_THRESH,
+            "DISEASE_MIN_THRESH": DISEASE_MIN_THRESH,
+        },
         **raw,
-        "translated": translate_code(raw.get("top_code")),
     }
