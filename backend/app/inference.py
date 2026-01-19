@@ -1,8 +1,7 @@
-import json
 import os
-import hashlib
+import json
 from io import BytesIO
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 import torch
 import torch.nn as nn
@@ -10,35 +9,34 @@ import torchvision.transforms as T
 from torchvision import models
 from PIL import Image
 
-
-BUILD_MARKER = "INFERENCE_DUALEYE_RESNET50_MATCH_TRAINING_2026_01_19"
+BUILD_MARKER = "INFERENCE_DUALEYE_RESNET50_MATCH_TRAIN_2026_01_19"
 
 BASE_DIR = os.path.dirname(__file__)
 MODEL_DIR = os.path.join(BASE_DIR, "model_files")
-
 LABELS_PATH = os.path.join(MODEL_DIR, "labels.json")
-WEIGHTS_PATH = os.path.join(MODEL_DIR, "alati_dualeye_model_resnet50.pth")
 
+DEFAULT_VARIANT = os.getenv("MODEL_VARIANT", "resnet50").strip().lower()
 DEVICE = "cpu"
 
 
-# -----------------------------
+# --------------------------
 # Labels
-# Your labels.json format:
-# [
-#  {"code":"N","name":"normal"}, ...
-# ]
-# -----------------------------
+# --------------------------
 with open(LABELS_PATH, "r", encoding="utf-8") as f:
     labels_raw = json.load(f)
 
-if isinstance(labels_raw, list) and labels_raw and isinstance(labels_raw[0], dict):
-    LABEL_CODES = [x["code"] for x in labels_raw]
-    CODE_TO_NAME_RAW = {x["code"]: x["name"] for x in labels_raw}
+# expected:
+# [
+#   {"code":"N","name":"normal"},
+#   ...
+# ]
+if isinstance(labels_raw, list) and len(labels_raw) > 0 and isinstance(labels_raw[0], dict):
+    LABELS: List[str] = [x["code"] for x in labels_raw]
+    CODE_TO_NAME = {x["code"]: x["name"] for x in labels_raw}
 else:
     # fallback
-    LABEL_CODES = list(labels_raw)
-    CODE_TO_NAME_RAW = {
+    LABELS = list(labels_raw)
+    CODE_TO_NAME = {
         "N": "normal",
         "D": "diabetic_retinopathy",
         "G": "glaucoma",
@@ -49,42 +47,27 @@ else:
         "O": "other",
     }
 
-NUM_CLASSES = len(LABEL_CODES)
-
-
-def _ui_name(name: str) -> str:
-    if not name:
-        return "Uncertain"
-    name = name.replace("_", " ").replace("-", " ").strip()
-    return " ".join(w.capitalize() for w in name.split())
+NUM_CLASSES = len(LABELS)
 
 
 def translate_code(code: str) -> str:
     if not code:
         return "Uncertain"
-    return _ui_name(CODE_TO_NAME_RAW.get(code, code))
+    name = CODE_TO_NAME.get(code, code)
+    name = name.replace("_", " ").replace("-", " ").strip()
+    name = " ".join(w.capitalize() for w in name.split())
+    return name or "Uncertain"
 
 
-def _sha256_bytes(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-
-def _sha256_file(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-# -----------------------------
-# Model (MATCH TRAINING)
-# -----------------------------
+# --------------------------
+# Model (MATCH TRAIN.PY)
+# --------------------------
 class DualEyeModel(nn.Module):
     def __init__(self, num_classes: int):
         super().__init__()
         self.backbone = models.resnet50(weights=None)
         self.backbone.fc = nn.Identity()
+
         self.classifier = nn.Sequential(
             nn.Linear(2048 * 2, 256),
             nn.ReLU(),
@@ -100,82 +83,133 @@ class DualEyeModel(nn.Module):
         return self.classifier(combined)
 
 
-# -----------------------------
-# Preprocess (MATCH TRAINING)
-# Training used only Resize + ToTensor
-# (no ImageNet normalize!)
-# -----------------------------
 TRANSFORM = T.Compose([
     T.Resize((224, 224)),
     T.ToTensor(),
 ])
 
 
-def load_model() -> Tuple[nn.Module, str, str, int]:
-    if not os.path.exists(WEIGHTS_PATH):
-        raise RuntimeError(f"Model weights not found: {WEIGHTS_PATH}")
-
-    model = DualEyeModel(NUM_CLASSES).to(DEVICE)
-    state = torch.load(WEIGHTS_PATH, map_location=DEVICE)
-
-    missing, unexpected = model.load_state_dict(state, strict=False)
-
-    # We accept strict=False because sometimes training adds prefixes,
-    # BUT missing/unexpected should normally be empty for exact match.
-    load_report = f"missing={len(missing)} unexpected={len(unexpected)}"
-
-    model.eval()
-    return model, load_report, _sha256_file(WEIGHTS_PATH), os.path.getsize(WEIGHTS_PATH)
-
-
-MODEL, LOAD_REPORT, WEIGHTS_SHA, WEIGHTS_SIZE = load_model()
-ACTIVE_VARIANT = "dualeye_resnet50"
-
-
-def _tensor_from_bytes(image_bytes: bytes) -> torch.Tensor:
+def _load_image_tensor(image_bytes: bytes) -> torch.Tensor:
     img = Image.open(BytesIO(image_bytes)).convert("RGB")
     x = TRANSFORM(img).unsqueeze(0)  # [1,3,224,224]
     return x
 
 
-def predict_raw(left_bytes: bytes, right_bytes: bytes) -> dict:
-    left_x = _tensor_from_bytes(left_bytes)
-    right_x = _tensor_from_bytes(right_bytes)
+def _clean_state_dict(state: dict) -> dict:
+    """
+    training saved model.state_dict() where keys look like:
+      backbone.xxx
+      classifier.xxx
+    We keep that as-is.
+    But if it contains module., strip it.
+    """
+    cleaned = {}
+    for k, v in state.items():
+        nk = k
+        if nk.startswith("module."):
+            nk = nk[len("module."):]
+        cleaned[nk] = v
+    return cleaned
+
+
+def load_model() -> Tuple[nn.Module, str]:
+    """
+    Always load DualEyeModel ResNet50 (matches training).
+    """
+    weights_path = os.path.join(MODEL_DIR, "alati_dualeye_model_resnet50.pth")
+    if not os.path.exists(weights_path):
+        raise RuntimeError(f"Model weights not found: {weights_path}")
+
+    model = DualEyeModel(NUM_CLASSES).to(DEVICE)
+
+    ckpt = torch.load(weights_path, map_location=DEVICE)
+    if not isinstance(ckpt, dict):
+        # full model object saved (rare)
+        ckpt.eval()
+        return ckpt, "full_model_object"
+
+    state = _clean_state_dict(ckpt)
+
+    # strict should work if architecture matches training
+    missing, unexpected = model.load_state_dict(state, strict=False)
+
+    model.eval()
+
+    load_mode = "strict_ok"
+    if missing or unexpected:
+        load_mode = f"non_strict missing={len(missing)} unexpected={len(unexpected)}"
+
+    return model, load_mode
+
+
+MODEL, LOAD_MODE = load_model()
+ACTIVE_VARIANT = "resnet50_dualeye"
+
+
+# --------------------------
+# Inference
+# --------------------------
+def _probs_from_bytes(left_bytes: bytes, right_bytes: bytes) -> Dict[str, float]:
+    left_x = _load_image_tensor(left_bytes)
+    right_x = _load_image_tensor(right_bytes)
 
     with torch.no_grad():
-        out = MODEL(left_x, right_x)[0]  # [8]
-        probs = out.detach().cpu().tolist()
+        probs = MODEL(left_x, right_x)[0].detach().cpu().tolist()
 
-    prob_map = {LABEL_CODES[i]: float(probs[i]) for i in range(NUM_CLASSES)}
+    out = {}
+    for i in range(min(len(probs), len(LABELS))):
+        out[str(LABELS[i])] = float(probs[i])
+    return out
 
-    top_code = max(prob_map, key=prob_map.get)
-    top_prob = prob_map[top_code]
-    top3 = sorted(prob_map.items(), key=lambda kv: kv[1], reverse=True)[:3]
+
+def predict_raw(left_bytes: bytes, right_bytes: bytes) -> dict:
+    """
+    Returns RAW AI output:
+      {top_code, top_prob, top3}
+    """
+    probs = _probs_from_bytes(left_bytes, right_bytes)
+    if not probs:
+        return {"top_code": None, "top_prob": None, "top3": []}
+
+    top_code = max(probs, key=probs.get)
+    top_prob = float(probs[top_code])
+    top3 = sorted(probs.items(), key=lambda kv: kv[1], reverse=True)[:3]
 
     return {
         "top_code": top_code,
-        "top_prob": float(top_prob),
+        "top_prob": top_prob,
         "top3": [(k, float(v)) for k, v in top3],
-        "probs": prob_map,
     }
 
 
-def predict_diagnosis(left_bytes: bytes, right_bytes: bytes, threshold: float = 0.50) -> str:
+def predict_diagnosis(left_bytes: bytes, right_bytes: bytes) -> str:
+    """
+    Always returns clean UI diagnosis string only.
+    """
     raw = predict_raw(left_bytes, right_bytes)
-    if raw["top_prob"] < threshold:
+    top_code = raw.get("top_code")
+    top_prob = raw.get("top_prob")
+
+    if top_code is None or top_prob is None:
         return "Uncertain"
-    return translate_code(raw["top_code"])
+
+    # confidence guard
+    if top_prob < 0.50:
+        return "Uncertain"
+
+    return translate_code(top_code)
 
 
 def predict_debug(left_bytes: bytes, right_bytes: bytes) -> dict:
     raw = predict_raw(left_bytes, right_bytes)
+    top_code = raw.get("top_code")
+
     return {
         "build_marker": BUILD_MARKER,
         "active_variant": ACTIVE_VARIANT,
-        "weights_sha": WEIGHTS_SHA,
-        "weights_size": WEIGHTS_SIZE,
-        "load_report": LOAD_REPORT,
-        "labels": LABEL_CODES,
+        "load_mode": LOAD_MODE,
+        "labels": LABELS,
+        "num_classes": NUM_CLASSES,
         **raw,
-        "translated": translate_code(raw["top_code"]),
+        "translated": translate_code(top_code) if top_code else None,
     }
