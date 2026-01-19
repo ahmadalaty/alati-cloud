@@ -1,4 +1,3 @@
-import os
 import hashlib
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -11,63 +10,51 @@ from .schemas import LoginRequest, TokenResponse, ScanResult
 from .auth import hash_password, verify_password, create_token, require_user
 from .storage_r2 import new_upload_id, key_for, put_bytes, BUILD_MARKER as STORAGE_MARKER
 
-# inference.py FINAL exports (must exist):
-# - predict_diagnosis(bytes) -> str
-# - predict_raw(bytes) -> dict with top_code/top_prob/top3
-# - translate_code(code) -> str
-# - predict_debug(bytes) -> dict
-# - ACTIVE_VARIANT, LOAD_MODE, BUILD_MARKER
+# IMPORTANT: this inference.py must be the DualEyeModel matching training
 from .inference import (
     predict_diagnosis,
+    predict_debug,
     predict_raw,
     translate_code,
-    predict_debug,
     BUILD_MARKER as INF_MARKER,
     ACTIVE_VARIANT,
-    LOAD_MODE,
 )
 
 app = FastAPI(title="Alati Cloud Demo (No Worker, R2-only)")
 Base.metadata.create_all(bind=engine)
 
 
-# -------------------------
-# Utilities
-# -------------------------
+# --------------------------
+# Helpers
+# --------------------------
 def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
-def _clean_diag(diag: str) -> str:
+def _clean_diag_text(txt: str) -> str:
     """
-    Ensure diagnosis shown on UI is clean:
-      - string only
-      - title case
+    Ensure UI always shows ONLY clean diagnosis name.
     """
-    if diag is None:
+    if not txt:
         return "Uncertain"
-    if not isinstance(diag, str):
-        diag = str(diag)
-
-    diag = diag.strip()
-    if not diag:
+    if not isinstance(txt, str):
+        txt = str(txt)
+    txt = txt.strip()
+    if not txt:
         return "Uncertain"
+    txt = txt.replace("_", " ").replace("-", " ").strip()
+    txt = " ".join(w.capitalize() for w in txt.split())
+    return txt
 
-    diag = diag.replace("_", " ").replace("-", " ").strip()
-    diag = " ".join(w.capitalize() for w in diag.split())
-    return diag or "Uncertain"
 
-
+# --------------------------
+# Admin bootstrapping
+# --------------------------
 def upsert_admin():
-    """
-    Creates/updates OWNER admin user if env vars exist:
-      OWNER_EMAIL
-      OWNER_PASSWORD
-    """
     db = SessionLocal()
     try:
-        email = (getattr(settings, "OWNER_EMAIL", "") or "").strip().lower()
-        password = (getattr(settings, "OWNER_PASSWORD", "") or "").strip()
+        email = (settings.OWNER_EMAIL or "").strip().lower()
+        password = (settings.OWNER_PASSWORD or "").strip()
         if not email or not password:
             return
 
@@ -92,9 +79,9 @@ def startup():
     upsert_admin()
 
 
-# -------------------------
-# Health / debug
-# -------------------------
+# --------------------------
+# Health / Debug
+# --------------------------
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -103,28 +90,38 @@ def health():
 @app.get("/debug")
 def debug():
     return {
-        "storage_mode": getattr(settings, "STORAGE_MODE", ""),
+        "storage_mode": settings.STORAGE_MODE,
+        "model_variant": ACTIVE_VARIANT,
         "storage_marker": STORAGE_MARKER,
         "inference_marker": INF_MARKER,
-        "model_variant": ACTIVE_VARIANT,
-        "load_mode": LOAD_MODE,
-        "r2_bucket_set": bool(getattr(settings, "R2_BUCKET", "")),
-        "debug_errors": getattr(settings, "DEBUG_ERRORS", ""),
+        "r2_bucket_set": bool(settings.R2_BUCKET),
+        "demo_mode": getattr(settings, "DEMO_MODE", ""),
+        "note": "Use /debug/inference to see AI top3",
     }
 
 
 @app.post("/debug/inference")
-async def debug_inference(file: UploadFile = File(...)):
+async def debug_inference(
+    left_file: UploadFile = File(...),
+    right_file: UploadFile | None = File(None),
+):
     """
-    Upload ANY image here -> returns debug JSON including top3.
+    Debug dual-eye inference.
+    If only left_file is provided → (img,img)
+    If both are provided → (left,right)
     """
-    image_bytes = await file.read()
-    return predict_debug(image_bytes)
+    left_bytes = await left_file.read()
+    if right_file is None:
+        right_bytes = left_bytes
+    else:
+        right_bytes = await right_file.read()
+
+    return predict_debug(left_bytes, right_bytes)
 
 
-# -------------------------
+# --------------------------
 # UI
-# -------------------------
+# --------------------------
 @app.get("/", response_class=HTMLResponse)
 def ui():
     return """
@@ -136,27 +133,27 @@ def ui():
   <title>Alati Demo</title>
   <style>
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#0b1020;color:#e8ecff;}
-    .wrap{max-width:820px;margin:0 auto;padding:28px 16px 48px;}
-    .card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:16px;margin:14px 0;}
+    .wrap{max-width:860px;margin:0 auto;padding:28px 16px 48px;}
+    .card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:18px;padding:18px;margin:14px 0;}
     h1{font-size:28px;margin:0 0 6px;}
     .sub{opacity:.85;margin:0 0 18px;}
     label{display:block;font-size:13px;opacity:.85;margin:10px 0 6px;}
     input,select,button{width:100%;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.25);color:#e8ecff;font-size:15px;}
-    button{cursor:pointer;background:#355dff;border:0;font-weight:800;}
+    button{cursor:pointer;background:#355dff;border:0;font-weight:900;}
     button:disabled{opacity:.6;cursor:not-allowed;}
     .row{display:flex;gap:12px;align-items:flex-end;}
     .row>div{flex:1;}
     .muted{opacity:.8;font-size:13px;}
-    .ok{color:#67ffb1;font-weight:800;}
-    .bad{color:#ff8a8a;font-weight:800;}
+    .ok{color:#67ffb1;font-weight:900;}
+    .bad{color:#ff8a8a;font-weight:900;}
     .result{padding:14px;border-radius:14px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.12);margin-top:10px;}
     .big{font-size:18px;font-weight:900;}
     a{color:#9fb3ff;}
     .tabs{display:flex;gap:10px;margin-top:8px;}
-    .tab{flex:1;padding:10px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.20);text-align:center;cursor:pointer;font-weight:800;}
+    .tab{flex:1;padding:10px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.20);text-align:center;cursor:pointer;font-weight:900;}
     .tab.active{background:#355dff;border-color:#355dff;}
     .hint{opacity:.75;font-size:12px;margin-top:6px;}
-    .diag{white-space:pre-line;font-size:16px;font-weight:900;line-height:1.6;}
+    .diag{white-space:pre-line;font-size:18px;font-weight:1000;line-height:1.7;}
   </style>
 </head>
 <body>
@@ -191,7 +188,7 @@ def ui():
       <div class="tab active" id="tabUpload" onclick="setSource('upload')">Upload</div>
       <div class="tab" id="tabCamera" onclick="setSource('camera')">Camera</div>
     </div>
-    <div class="hint">Upload = choose photo. Camera = open capture. (Upload tab should still show camera option on iPhone.)</div>
+    <div class="hint">Upload = pick photo. Camera = open camera capture.</div>
 
     <div id="singleBox">
       <label>Image</label>
@@ -243,16 +240,17 @@ function setSource(src){
 }
 
 function applyCapture(){
+  const cap = (SOURCE==="camera") ? "environment" : "";
   const inputs = ["singleFile","leftFile","rightFile"];
+
   for(const id of inputs){
     const el = document.getElementById(id);
     if(!el) continue;
 
     if(SOURCE==="camera"){
-      el.setAttribute("capture", "environment");
+      el.setAttribute("capture", cap);
     } else {
-      // Remove capture to allow iPhone picker: camera OR upload
-      el.removeAttribute("capture");
+      el.removeAttribute("capture"); // allows camera OR upload chooser
     }
 
     el.value = "";
@@ -331,9 +329,9 @@ async function runScan(){
       if(data.eye_mode === "both"){
         txt = "Left: " + (data.left_diagnosis || "-") + "\\nRight: " + (data.right_diagnosis || "-");
       }else if(data.eye_mode === "left"){
-        txt = (data.left_diagnosis || "-");
+        txt = "Left: " + (data.left_diagnosis || "-");
       }else{
-        txt = (data.right_diagnosis || "-");
+        txt = "Right: " + (data.right_diagnosis || "-");
       }
 
       document.getElementById("diagText").textContent = txt;
@@ -350,9 +348,9 @@ async function runScan(){
 """
 
 
-# -------------------------
+# --------------------------
 # Auth
-# -------------------------
+# --------------------------
 @app.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
     email = (body.email or "").strip().lower()
@@ -362,9 +360,9 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     return {"access_token": create_token(user.id)}
 
 
-# -------------------------
-# Scan endpoint
-# -------------------------
+# --------------------------
+# Scan Endpoint (NO WORKER)
+# --------------------------
 @app.post("/scan/run", response_model=ScanResult)
 async def scan_run(
     eye_mode: str = Form(...),
@@ -379,7 +377,9 @@ async def scan_run(
         raise HTTPException(400, detail="eye_mode must be left/right/both")
 
     try:
+        # ------------------
         # BOTH EYES
+        # ------------------
         if eye_mode == "both":
             if left_file is None or right_file is None:
                 raise HTTPException(400, detail="left_file and right_file are required for both")
@@ -396,38 +396,32 @@ async def scan_run(
             put_bytes(left_key, left_bytes, left_file.content_type or "image/jpeg")
             put_bytes(right_key, right_bytes, right_file.content_type or "image/jpeg")
 
-            rawL = predict_raw(left_bytes)
-            rawR = predict_raw(right_bytes)
-
-            diagL = _clean_diag(predict_diagnosis(left_bytes))
-            diagR = _clean_diag(predict_diagnosis(right_bytes))
+            raw = predict_raw(left_bytes, right_bytes)
+            translated = translate_code(raw["top_code"])
+            final_diag = _clean_diag_text(translated) if raw["top_prob"] >= 0.50 else "Uncertain"
 
             print(
                 "[AI RAW BOTH]",
-                "L_len=", len(left_bytes),
                 "L_sha=", _sha256(left_bytes)[:12],
-                "L_top_code=", rawL.get("top_code"),
-                "L_top_prob=", rawL.get("top_prob"),
-                "L_top3=", rawL.get("top3"),
-                "L_translated=", translate_code(rawL.get("top_code")),
-                "L_final=", diagL,
-                "|",
-                "R_len=", len(right_bytes),
                 "R_sha=", _sha256(right_bytes)[:12],
-                "R_top_code=", rawR.get("top_code"),
-                "R_top_prob=", rawR.get("top_prob"),
-                "R_top3=", rawR.get("top3"),
-                "R_translated=", translate_code(rawR.get("top_code")),
-                "R_final=", diagR,
+                "top_code=", raw["top_code"],
+                "top_prob=", raw["top_prob"],
+                "top3=", raw["top3"],
+                "translated=", translated,
+                "final_diag=", final_diag,
             )
 
+            # NOTE:
+            # Model gives ONE combined result for both-eye input.
+            # For UI we show same result as left/right diagnosis
+            # (until you train separate per-eye model).
             scan = Scan(
                 user_id=user_id,
                 eye_mode="both",
                 left_key=left_key,
                 right_key=right_key,
-                left_diagnosis=diagL,
-                right_diagnosis=diagR,
+                left_diagnosis=final_diag,
+                right_diagnosis=final_diag,
                 status="done",
             )
             db.add(scan)
@@ -443,7 +437,11 @@ async def scan_run(
                 error=None,
             )
 
-        # SINGLE EYE
+        # ------------------
+        # SINGLE EYE (left OR right)
+        # Dual-eye model requires TWO images,
+        # so we pass (img,img)
+        # ------------------
         if file is None:
             raise HTTPException(400, detail="file is required for left/right")
 
@@ -453,19 +451,21 @@ async def scan_run(
         r2_key = key_for(eye_mode, upload_id)
         put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
 
-        raw = predict_raw(image_bytes)
-        diag = _clean_diag(predict_diagnosis(image_bytes))
+        # DualEyeModel expects (left,right):
+        raw = predict_raw(image_bytes, image_bytes)
+        translated = translate_code(raw["top_code"])
+        final_diag = _clean_diag_text(translated) if raw["top_prob"] >= 0.50 else "Uncertain"
 
         print(
-            "[AI RAW]",
+            "[AI RAW ONE]",
             "mode=", eye_mode,
             "len=", len(image_bytes),
             "sha=", _sha256(image_bytes)[:12],
-            "top_code=", raw.get("top_code"),
-            "top_prob=", raw.get("top_prob"),
-            "top3=", raw.get("top3"),
-            "translated=", translate_code(raw.get("top_code")),
-            "final_diag=", diag,
+            "top_code=", raw["top_code"],
+            "top_prob=", raw["top_prob"],
+            "top3=", raw["top3"],
+            "translated=", translated,
+            "final_diag=", final_diag,
         )
 
         scan = Scan(
@@ -473,8 +473,8 @@ async def scan_run(
             eye_mode=eye_mode,
             left_key=r2_key if eye_mode == "left" else None,
             right_key=r2_key if eye_mode == "right" else None,
-            left_diagnosis=diag if eye_mode == "left" else None,
-            right_diagnosis=diag if eye_mode == "right" else None,
+            left_diagnosis=final_diag if eye_mode == "left" else None,
+            right_diagnosis=final_diag if eye_mode == "right" else None,
             status="done",
         )
         db.add(scan)
