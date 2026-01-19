@@ -10,33 +10,68 @@ from .models import User, Scan
 from .schemas import LoginRequest, TokenResponse, ScanResult
 from .auth import hash_password, verify_password, create_token, require_user
 from .storage_r2 import new_upload_id, key_for, put_bytes, BUILD_MARKER as STORAGE_MARKER
+
+# inference.py FINAL exports (must exist):
+# - predict_diagnosis(bytes) -> str
+# - predict_raw(bytes) -> dict with top_code/top_prob/top3
+# - translate_code(code) -> str
+# - predict_debug(bytes) -> dict
+# - ACTIVE_VARIANT, LOAD_MODE, BUILD_MARKER
 from .inference import (
     predict_diagnosis,
+    predict_raw,
+    translate_code,
     predict_debug,
     BUILD_MARKER as INF_MARKER,
     ACTIVE_VARIANT,
+    LOAD_MODE,
 )
 
 app = FastAPI(title="Alati Cloud Demo (No Worker, R2-only)")
 Base.metadata.create_all(bind=engine)
 
 
+# -------------------------
+# Utilities
+# -------------------------
 def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
+def _clean_diag(diag: str) -> str:
+    """
+    Ensure diagnosis shown on UI is clean:
+      - string only
+      - title case
+    """
+    if diag is None:
+        return "Uncertain"
+    if not isinstance(diag, str):
+        diag = str(diag)
+
+    diag = diag.strip()
+    if not diag:
+        return "Uncertain"
+
+    diag = diag.replace("_", " ").replace("-", " ").strip()
+    diag = " ".join(w.capitalize() for w in diag.split())
+    return diag or "Uncertain"
+
+
 def upsert_admin():
     """
-    Creates/updates OWNER_EMAIL + OWNER_PASSWORD as admin.
+    Creates/updates OWNER admin user if env vars exist:
+      OWNER_EMAIL
+      OWNER_PASSWORD
     """
     db = SessionLocal()
     try:
-        email = (settings.OWNER_EMAIL or "").strip().lower()
-        password = (settings.OWNER_PASSWORD or "").strip()
+        email = (getattr(settings, "OWNER_EMAIL", "") or "").strip().lower()
+        password = (getattr(settings, "OWNER_PASSWORD", "") or "").strip()
         if not email or not password:
             return
 
-        # passlib/bcrypt max 72 bytes
+        # bcrypt max 72 bytes
         password = password[:72]
 
         user = db.query(User).filter(User.email == email).first()
@@ -57,6 +92,9 @@ def startup():
     upsert_admin()
 
 
+# -------------------------
+# Health / debug
+# -------------------------
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -64,29 +102,29 @@ def health():
 
 @app.get("/debug")
 def debug():
-    """
-    Quick sanity: confirms backend is using correct inference/storage code markers.
-    """
     return {
-        "storage_mode": settings.STORAGE_MODE,
-        "model_variant": ACTIVE_VARIANT,
+        "storage_mode": getattr(settings, "STORAGE_MODE", ""),
         "storage_marker": STORAGE_MARKER,
         "inference_marker": INF_MARKER,
-        "r2_bucket_set": bool(settings.R2_BUCKET),
-        "demo_mode": getattr(settings, "DEMO_MODE", ""),
-        "hint": "Use /debug/inference for raw AI output (top3).",
+        "model_variant": ACTIVE_VARIANT,
+        "load_mode": LOAD_MODE,
+        "r2_bucket_set": bool(getattr(settings, "R2_BUCKET", "")),
+        "debug_errors": getattr(settings, "DEBUG_ERRORS", ""),
     }
 
 
 @app.post("/debug/inference")
 async def debug_inference(file: UploadFile = File(...)):
     """
-    Upload a fundus image and see raw model output.
+    Upload ANY image here -> returns debug JSON including top3.
     """
     image_bytes = await file.read()
     return predict_debug(image_bytes)
 
 
+# -------------------------
+# UI
+# -------------------------
 @app.get("/", response_class=HTMLResponse)
 def ui():
     return """
@@ -153,7 +191,7 @@ def ui():
       <div class="tab active" id="tabUpload" onclick="setSource('upload')">Upload</div>
       <div class="tab" id="tabCamera" onclick="setSource('camera')">Camera</div>
     </div>
-    <div class="hint">Upload = pick photo. Camera = open camera capture.</div>
+    <div class="hint">Upload = choose photo. Camera = open capture. (Upload tab should still show camera option on iPhone.)</div>
 
     <div id="singleBox">
       <label>Image</label>
@@ -205,17 +243,16 @@ function setSource(src){
 }
 
 function applyCapture(){
-  const cap = (SOURCE==="camera") ? "environment" : "";
   const inputs = ["singleFile","leftFile","rightFile"];
-
   for(const id of inputs){
     const el = document.getElementById(id);
     if(!el) continue;
 
     if(SOURCE==="camera"){
-      el.setAttribute("capture", cap);
+      el.setAttribute("capture", "environment");
     } else {
-      el.removeAttribute("capture"); // gives BOTH camera+upload choice on phones
+      // Remove capture to allow iPhone picker: camera OR upload
+      el.removeAttribute("capture");
     }
 
     el.value = "";
@@ -294,9 +331,9 @@ async function runScan(){
       if(data.eye_mode === "both"){
         txt = "Left: " + (data.left_diagnosis || "-") + "\\nRight: " + (data.right_diagnosis || "-");
       }else if(data.eye_mode === "left"){
-        txt = "Left: " + (data.left_diagnosis || "-");
+        txt = (data.left_diagnosis || "-");
       }else{
-        txt = "Right: " + (data.right_diagnosis || "-");
+        txt = (data.right_diagnosis || "-");
       }
 
       document.getElementById("diagText").textContent = txt;
@@ -313,6 +350,9 @@ async function runScan(){
 """
 
 
+# -------------------------
+# Auth
+# -------------------------
 @app.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
     email = (body.email or "").strip().lower()
@@ -322,6 +362,9 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     return {"access_token": create_token(user.id)}
 
 
+# -------------------------
+# Scan endpoint
+# -------------------------
 @app.post("/scan/run", response_model=ScanResult)
 async def scan_run(
     eye_mode: str = Form(...),
@@ -336,6 +379,7 @@ async def scan_run(
         raise HTTPException(400, detail="eye_mode must be left/right/both")
 
     try:
+        # BOTH EYES
         if eye_mode == "both":
             if left_file is None or right_file is None:
                 raise HTTPException(400, detail="left_file and right_file are required for both")
@@ -352,31 +396,29 @@ async def scan_run(
             put_bytes(left_key, left_bytes, left_file.content_type or "image/jpeg")
             put_bytes(right_key, right_bytes, right_file.content_type or "image/jpeg")
 
-            # RAW AI DEBUG (before translation)
-            dbgL = predict_debug(left_bytes)
-            dbgR = predict_debug(right_bytes)
+            rawL = predict_raw(left_bytes)
+            rawR = predict_raw(right_bytes)
 
-            # Final UI diagnosis string
-            left_diag = predict_diagnosis(left_bytes)
-            right_diag = predict_diagnosis(right_bytes)
+            diagL = _clean_diag(predict_diagnosis(left_bytes))
+            diagR = _clean_diag(predict_diagnosis(right_bytes))
 
             print(
                 "[AI RAW BOTH]",
                 "L_len=", len(left_bytes),
                 "L_sha=", _sha256(left_bytes)[:12],
-                "L_top_code=", dbgL.get("top_code"),
-                "L_top_prob=", dbgL.get("top_prob"),
-                "L_top3=", dbgL.get("top3"),
-                "L_translated=", dbgL.get("translated"),
-                "L_final=", left_diag,
-                "||",
+                "L_top_code=", rawL.get("top_code"),
+                "L_top_prob=", rawL.get("top_prob"),
+                "L_top3=", rawL.get("top3"),
+                "L_translated=", translate_code(rawL.get("top_code")),
+                "L_final=", diagL,
+                "|",
                 "R_len=", len(right_bytes),
                 "R_sha=", _sha256(right_bytes)[:12],
-                "R_top_code=", dbgR.get("top_code"),
-                "R_top_prob=", dbgR.get("top_prob"),
-                "R_top3=", dbgR.get("top3"),
-                "R_translated=", dbgR.get("translated"),
-                "R_final=", right_diag,
+                "R_top_code=", rawR.get("top_code"),
+                "R_top_prob=", rawR.get("top_prob"),
+                "R_top3=", rawR.get("top3"),
+                "R_translated=", translate_code(rawR.get("top_code")),
+                "R_final=", diagR,
             )
 
             scan = Scan(
@@ -384,8 +426,8 @@ async def scan_run(
                 eye_mode="both",
                 left_key=left_key,
                 right_key=right_key,
-                left_diagnosis=left_diag,
-                right_diagnosis=right_diag,
+                left_diagnosis=diagL,
+                right_diagnosis=diagR,
                 status="done",
             )
             db.add(scan)
@@ -401,7 +443,7 @@ async def scan_run(
                 error=None,
             )
 
-        # single eye
+        # SINGLE EYE
         if file is None:
             raise HTTPException(400, detail="file is required for left/right")
 
@@ -411,21 +453,18 @@ async def scan_run(
         r2_key = key_for(eye_mode, upload_id)
         put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
 
-        # RAW AI DEBUG (before translation)
-        dbg = predict_debug(image_bytes)
-
-        # Final UI diagnosis string
-        diag = predict_diagnosis(image_bytes)
+        raw = predict_raw(image_bytes)
+        diag = _clean_diag(predict_diagnosis(image_bytes))
 
         print(
             "[AI RAW]",
             "mode=", eye_mode,
             "len=", len(image_bytes),
             "sha=", _sha256(image_bytes)[:12],
-            "top_code=", dbg.get("top_code"),
-            "top_prob=", dbg.get("top_prob"),
-            "top3=", dbg.get("top3"),
-            "translated=", dbg.get("translated"),
+            "top_code=", raw.get("top_code"),
+            "top_prob=", raw.get("top_prob"),
+            "top3=", raw.get("top3"),
+            "translated=", translate_code(raw.get("top_code")),
             "final_diag=", diag,
         )
 
