@@ -1,13 +1,30 @@
 import hashlib
-from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import Base, engine, get_db, SessionLocal
-from .models import User, Scan
-from .schemas import LoginRequest, TokenResponse, ScanResult
-from .auth import hash_password, verify_password, create_token, require_user
+from .models import User, Scan, APIToken
+from .schemas import (
+    LoginRequest, 
+    TokenResponse, 
+    ScanResult,
+    RegisterRequest,
+    IssuedTokenResponse,
+    IssueTokenRequest,
+    APITokenResponse,
+)
+from .auth import (
+    hash_password, 
+    verify_password, 
+    create_token, 
+    require_user,
+    require_admin,
+    generate_api_token,
+    hash_api_token,
+    verify_api_token,
+)
 from .storage_r2 import new_upload_id, key_for, put_bytes, BUILD_MARKER as STORAGE_MARKER
 from .inference import (
     predict_diagnosis,
@@ -25,6 +42,7 @@ def _sha256(b: bytes) -> str:
 
 
 def upsert_admin():
+    """Create admin user on startup if OWNER_EMAIL and OWNER_PASSWORD are set"""
     db = SessionLocal()
     try:
         email = (settings.OWNER_EMAIL or "").strip().lower()
@@ -84,16 +102,25 @@ def ui():
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Alati Demo</title>
+  <title>Alati Cloud</title>
   <style>
+    *{box-sizing:border-box;}
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#0b1020;color:#e8ecff;}
-    .wrap{max-width:820px;margin:0 auto;padding:28px 16px 48px;}
+    .wrap{max-width:1200px;margin:0 auto;padding:28px 16px 48px;}
     .card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:16px;margin:14px 0;}
     h1{font-size:28px;margin:0 0 6px;}
+    h2{font-size:20px;margin:12px 0 8px;}
+    h3{font-size:16px;margin:10px 0 8px;}
     .sub{opacity:.85;margin:0 0 18px;}
     label{display:block;font-size:13px;opacity:.85;margin:10px 0 6px;}
-    input,select,button{width:100%;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.25);color:#e8ecff;font-size:15px;}
-    button{cursor:pointer;background:#355dff;border:0;font-weight:800;}
+    input,select,textarea,button{padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.25);color:#e8ecff;font-size:15px;font-family:inherit;}
+    input,select,textarea{width:100%;}
+    button{cursor:pointer;background:#355dff;border:0;font-weight:800;width:auto;padding:10px 20px;}
+    button:hover{background:#2851e8;}
+    button.danger{background:#ff6b6b;}
+    button.danger:hover{background:#ff5252;}
+    button.secondary{background:#666;}
+    button.secondary:hover{background:#777;}
     button:disabled{opacity:.6;cursor:not-allowed;}
     .row{display:flex;gap:12px;align-items:flex-end;}
     .row>div{flex:1;}
@@ -102,33 +129,104 @@ def ui():
     .bad{color:#ff8a8a;font-weight:800;}
     .result{padding:14px;border-radius:14px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.12);margin-top:10px;}
     .big{font-size:18px;font-weight:900;}
-    a{color:#9fb3ff;}
+    a{color:#9fb3ff;text-decoration:none;}
+    a:hover{text-decoration:underline;}
     .tabs{display:flex;gap:10px;margin-top:8px;}
     .tab{flex:1;padding:10px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.20);text-align:center;cursor:pointer;font-weight:800;}
     .tab.active{background:#355dff;border-color:#355dff;}
     .hint{opacity:.75;font-size:12px;margin-top:6px;}
     .diag{white-space:pre-line;font-size:16px;font-weight:900;line-height:1.6;}
+    .table{width:100%;border-collapse:collapse;margin-top:12px;}
+    .table th{background:rgba(255,255,255,.1);padding:10px;text-align:left;border-bottom:1px solid rgba(255,255,255,.12);}
+    .table td{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);}
+    .table tr:hover{background:rgba(255,255,255,.04);}
+    .badge{display:inline-block;padding:4px 8px;border-radius:6px;font-size:12px;background:rgba(51,93,255,.3);}
+    .badge.active{background:rgba(103,255,177,.3);color:#67ffb1;}
+    .badge.inactive{background:rgba(255,138,138,.3);color:#ff8a8a;}
+    .flex-between{display:flex;justify-content:space-between;align-items:center;}
+    .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+    @media(max-width:768px){.grid-2{grid-template-columns:1fr;}}
   </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>Alati Cloud Demo</h1>
-  <p class="sub">Login → choose eye → choose Upload/Camera → diagnosis only.</p>
+  <h1>🔬 Alati Cloud</h1>
 
-  <div class="card" id="loginCard">
-    <h3 style="margin:0 0 8px;">1) Login</h3>
-    <label>Email</label>
-    <input id="email" placeholder="admin@alati.ai"/>
-    <label>Password</label>
-    <input id="password" type="password" placeholder="••••••••"/>
-    <div style="height:10px"></div>
-    <button onclick="doLogin()">Login</button>
-    <p id="loginStatus" class="muted"></p>
-    <p class="muted">Debug: <a href="/debug" target="_blank">/debug</a></p>
+  <div class="card" id="authCard">
+    <h3 style="margin:0 0 8px;">Authentication</h3>
+    <div id="loginTab">
+      <label>Email</label>
+      <input id="email" placeholder="user@example.com"/>
+      <label>Password</label>
+      <input id="password" type="password" placeholder="••••••••"/>
+      <div style="height:10px"></div>
+      <button onclick="doLogin()">Login</button>
+      <button onclick="showRegister()" class="secondary" style="margin-left:8px;">Create Account</button>
+    </div>
+    <div id="registerTab" style="display:none;">
+      <label>Email</label>
+      <input id="regEmail" placeholder="user@example.com"/>
+      <label>Password (optional)</label>
+      <input id="regPassword" type="password" placeholder="••••••••"/>
+      <div style="height:10px"></div>
+      <button onclick="doRegister()">Register</button>
+      <button onclick="showLogin()" class="secondary" style="margin-left:8px;">Back to Login</button>
+    </div>
+    <p id="authStatus" class="muted"></p>
   </div>
 
+  <!-- ADMIN DASHBOARD (only visible for owner) -->
+  <div class="card" id="adminCard" style="display:none;border-color:#ffc107;border-width:2px;">
+    <div class="flex-between">
+      <h2>👑 Admin Dashboard</h2>
+      <button onclick="doLogout()" class="secondary">Logout</button>
+    </div>
+
+    <!-- Issue Token Section -->
+    <div style="margin-top:20px;padding:16px;background:rgba(51,93,255,.1);border-radius:12px;">
+      <h3 style="margin-top:0;">Issue New API Token</h3>
+      <label>Enter User ID</label>
+      <input id="tokenUserId" type="number" placeholder="e.g., 2"/>
+      <label>Token Name (optional)</label>
+      <input id="tokenName" placeholder="e.g., Mobile App, Testing"/>
+      <div style="height:10px"></div>
+      <button onclick="issueToken()">Generate Token</button>
+      <p id="tokenStatus" class="muted"></p>
+      
+      <div id="tokenDisplay" style="display:none;margin-top:16px;padding:12px;background:rgba(0,0,0,.3);border-radius:8px;">
+        <p style="margin:0 0 8px;"><strong>✅ Token Created!</strong></p>
+        <p style="margin:0 0 8px;opacity:.85;font-size:12px;">Save this token now - it won't be shown again:</p>
+        <textarea id="tokenValue" readonly style="height:80px;font-family:monospace;font-size:12px;"></textarea>
+        <button onclick="copyToken()" style="margin-top:8px;">Copy Token</button>
+      </div>
+    </div>
+
+    <!-- Manage Tokens -->
+    <div style="margin-top:30px;">
+      <h3>Active API Tokens</h3>
+      <button onclick="loadTokens()" style="margin-bottom:12px;">Refresh</button>
+      <table class="table" id="tokensTable">
+        <thead>
+          <tr>
+            <th>Token ID</th>
+            <th>User ID</th>
+            <th>Name</th>
+            <th>Created</th>
+            <th>Status</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="tokensList"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- SCAN CARD (only for regular users) -->
   <div class="card" id="scanCard" style="display:none;">
-    <h3 style="margin:0 0 8px;">2) Scan</h3>
+    <div class="flex-between">
+      <h3 style="margin:0;">Eye Scan</h3>
+      <button onclick="doLogout()" class="secondary">Logout</button>
+    </div>
 
     <label>Eye mode</label>
     <select id="eyeMode" onchange="refreshInputs()">
@@ -176,14 +274,28 @@ def ui():
 
 <script>
 let TOKEN = null;
-let SOURCE = "upload"; // upload | camera
+let IS_OWNER = false;
+let OWNER_EMAIL = "";
+let OWNER_PASSWORD = "";
+let SOURCE = "upload";
 
 function setStatus(id, msg, ok=null){
   const el = document.getElementById(id);
+  if(!el) return;
   el.textContent = msg;
   if(ok===true) el.className="muted ok";
   else if(ok===false) el.className="muted bad";
   else el.className="muted";
+}
+
+function showLogin(){
+  document.getElementById("loginTab").style.display="block";
+  document.getElementById("registerTab").style.display="none";
+}
+
+function showRegister(){
+  document.getElementById("loginTab").style.display="none";
+  document.getElementById("registerTab").style.display="block";
 }
 
 function setSource(src){
@@ -199,11 +311,10 @@ function applyCapture(){
   for(const id of inputs){
     const el = document.getElementById(id);
     if(!el) continue;
-
     if(SOURCE==="camera"){
       el.setAttribute("capture", cap);
     } else {
-      el.removeAttribute("capture"); // allow upload chooser
+      el.removeAttribute("capture");
     }
     el.value = "";
   }
@@ -216,8 +327,28 @@ function refreshInputs(){
   applyCapture();
 }
 
+async function doRegister(){
+  setStatus("authStatus","Registering…");
+  const email = document.getElementById("regEmail").value.trim();
+  const password = document.getElementById("regPassword").value;
+
+  try{
+    const r = await fetch("/auth/register",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({email, password})
+    });
+    const data = await r.json();
+    if(!r.ok) throw new Error(data.detail || "Registration failed");
+    setStatus("authStatus","Registration OK! Now login. ✅",true);
+    setTimeout(() => showLogin(), 1000);
+  }catch(e){
+    setStatus("authStatus","Registration failed: "+e.message,false);
+  }
+}
+
 async function doLogin(){
-  setStatus("loginStatus","Logging in…");
+  setStatus("authStatus","Logging in…");
   const email = document.getElementById("email").value.trim();
   const password = document.getElementById("password").value;
 
@@ -230,13 +361,142 @@ async function doLogin(){
     const data = await r.json();
     if(!r.ok) throw new Error(data.detail || "Login failed");
     TOKEN = data.access_token;
+    IS_OWNER = data.is_owner || false;
 
-    setStatus("loginStatus","Login OK ✅",true);
-    document.getElementById("scanCard").style.display="block";
-    refreshInputs();
+    setStatus("authStatus","Login OK ✅",true);
+    document.getElementById("authCard").style.display="none";
+    
+    if(IS_OWNER){
+      OWNER_EMAIL = email;
+      OWNER_PASSWORD = password;
+      document.getElementById("adminCard").style.display="block";
+      loadTokens();
+    } else {
+      document.getElementById("scanCard").style.display="block";
+      refreshInputs();
+    }
   }catch(e){
     TOKEN = null;
-    setStatus("loginStatus","Login failed: "+e.message,false);
+    setStatus("authStatus","Login failed: "+e.message,false);
+  }
+}
+
+function doLogout(){
+  TOKEN = null;
+  IS_OWNER = false;
+  OWNER_EMAIL = "";
+  OWNER_PASSWORD = "";
+  document.getElementById("authCard").style.display="block";
+  document.getElementById("adminCard").style.display="none";
+  document.getElementById("scanCard").style.display="none";
+  document.getElementById("loginTab").style.display="block";
+  document.getElementById("registerTab").style.display="none";
+  document.getElementById("email").value = "";
+  document.getElementById("password").value = "";
+}
+
+async function loadTokens(){
+  if(!OWNER_EMAIL || !OWNER_PASSWORD) return;
+  
+  const authHeader = "Bearer " + OWNER_EMAIL + ":" + OWNER_PASSWORD;
+  
+  try{
+    const r = await fetch("/admin/tokens", {
+      headers: {"Authorization": authHeader}
+    });
+    if(!r.ok) throw new Error("Failed to load tokens");
+    const tokens = await r.json();
+    displayTokens(tokens);
+  }catch(e){
+    console.error("Error loading tokens:", e);
+  }
+}
+
+function displayTokens(tokens){
+  const tbody = document.getElementById("tokensList");
+  tbody.innerHTML = "";
+  
+  if(!tokens || tokens.length === 0){
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;opacity:.5;">No tokens yet</td></tr>';
+    return;
+  }
+  
+  tokens.forEach(token => {
+    const row = document.createElement("tr");
+    const createdDate = new Date(token.created_at).toLocaleDateString();
+    const status = token.is_active ? '<span class="badge active">Active</span>' : '<span class="badge inactive">Revoked</span>';
+    
+    row.innerHTML = `
+      <td>${token.id}</td>
+      <td>${token.user_id}</td>
+      <td>${token.name || '-'}</td>
+      <td>${createdDate}</td>
+      <td>${status}</td>
+      <td>
+        ${token.is_active ? '<button class="danger" onclick="revokeToken(' + token.id + ')">Revoke</button>' : '-'}
+      </td>
+    `;
+    tbody.appendChild(row);
+  });
+}
+
+async function issueToken(){
+  const userId = document.getElementById("tokenUserId").value;
+  const tokenName = document.getElementById("tokenName").value;
+  
+  if(!userId){
+    setStatus("tokenStatus","Please enter a user ID",false);
+    return;
+  }
+
+  const authHeader = "Bearer " + OWNER_EMAIL + ":" + OWNER_PASSWORD;
+
+  try{
+    const r = await fetch("/admin/tokens/issue", {
+      method: "POST",
+      headers: {
+        "Authorization": authHeader,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({user_id: parseInt(userId), name: tokenName || null})
+    });
+    const data = await r.json();
+    if(!r.ok) throw new Error(data.detail || "Failed to issue token");
+    
+    document.getElementById("tokenValue").value = data.token;
+    document.getElementById("tokenDisplay").style.display = "block";
+    document.getElementById("tokenUserId").value = "";
+    document.getElementById("tokenName").value = "";
+    setStatus("tokenStatus","Token created! ✅",true);
+    
+    setTimeout(() => loadTokens(), 500);
+  }catch(e){
+    setStatus("tokenStatus","Error: "+e.message,false);
+  }
+}
+
+function copyToken(){
+  const textarea = document.getElementById("tokenValue");
+  textarea.select();
+  document.execCommand("copy");
+  alert("Token copied to clipboard!");
+}
+
+async function revokeToken(tokenId){
+  if(!confirm("Revoke this token?")) return;
+  
+  const authHeader = "Bearer " + OWNER_EMAIL + ":" + OWNER_PASSWORD;
+
+  try{
+    const r = await fetch("/admin/tokens/" + tokenId, {
+      method: "DELETE",
+      headers: {"Authorization": authHeader}
+    });
+    if(!r.ok) throw new Error("Failed to revoke token");
+    alert("Token revoked!");
+    loadTokens();
+  }catch(e){
+    alert("Error: " + e.message);
   }
 }
 
@@ -298,155 +558,3 @@ async function runScan(){
 </body>
 </html>
 """
-
-
-@app.post("/auth/login", response_model=TokenResponse)
-def login(body: LoginRequest, db: Session = Depends(get_db)):
-    email = (body.email or "").strip().lower()
-    user = db.query(User).filter(User.email == email).first()
-    if not user or not verify_password(body.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    return {"access_token": create_token(user.id)}
-
-
-@app.post("/scan/run", response_model=ScanResult)
-async def scan_run(
-    eye_mode: str = Form(...),
-    file: UploadFile | None = File(None),
-    left_file: UploadFile | None = File(None),
-    right_file: UploadFile | None = File(None),
-    user_id: int = Depends(require_user),
-    db: Session = Depends(get_db),
-):
-    eye_mode = (eye_mode or "").strip().lower()
-    if eye_mode not in ("left", "right", "both"):
-        raise HTTPException(400, detail="eye_mode must be left/right/both")
-
-    try:
-        if eye_mode == "both":
-            if left_file is None or right_file is None:
-                raise HTTPException(400, detail="left_file and right_file required")
-
-            left_id = new_upload_id()
-            right_id = new_upload_id()
-
-            left_bytes = await left_file.read()
-            right_bytes = await right_file.read()
-
-            left_key = key_for("left", left_id)
-            right_key = key_for("right", right_id)
-
-            put_bytes(left_key, left_bytes, left_file.content_type or "image/jpeg")
-            put_bytes(right_key, right_bytes, right_file.content_type or "image/jpeg")
-
-            left_dbg = predict_debug(left_bytes)
-            right_dbg = predict_debug(right_bytes)
-
-            left_diag = left_dbg.get("translated") or "Uncertain"
-            right_diag = right_dbg.get("translated") or "Uncertain"
-
-            print(
-                "[AI RAW BOTH]",
-                "L_sha=", _sha256(left_bytes)[:12],
-                "L_final=", left_dbg.get("final_code"), left_dbg.get("final_reason"),
-                "L_top3=", left_dbg.get("top3"),
-                "| R_sha=", _sha256(right_bytes)[:12],
-                "R_final=", right_dbg.get("final_code"), right_dbg.get("final_reason"),
-                "R_top3=", right_dbg.get("top3"),
-            )
-
-            scan = Scan(
-                user_id=user_id,
-                eye_mode="both",
-                left_key=left_key,
-                right_key=right_key,
-                left_diagnosis=left_diag,
-                right_diagnosis=right_diag,
-                status="done",
-            )
-            db.add(scan)
-            db.commit()
-            db.refresh(scan)
-
-            return ScanResult(
-                id=scan.id,
-                eye_mode=scan.eye_mode,
-                left_diagnosis=scan.left_diagnosis,
-                right_diagnosis=scan.right_diagnosis,
-                status=scan.status,
-                error=None,
-            )
-
-        # single eye
-        if file is None:
-            raise HTTPException(400, detail="file required for left/right")
-
-        upload_id = new_upload_id()
-        image_bytes = await file.read()
-
-        r2_key = key_for(eye_mode, upload_id)
-        put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
-
-        dbg = predict_debug(image_bytes)
-        diag = dbg.get("translated") or "Uncertain"
-
-        print(
-            "[AI RAW ONE]",
-            "mode=", eye_mode,
-            "len=", len(image_bytes),
-            "sha=", _sha256(image_bytes)[:12],
-            "top_code=", dbg.get("top_code"),
-            "top_prob=", dbg.get("top_prob"),
-            "top3=", dbg.get("top3"),
-            "final_code=", dbg.get("final_code"),
-            "reason=", dbg.get("final_reason"),
-            "final_diag=", diag,
-        )
-
-        scan = Scan(
-            user_id=user_id,
-            eye_mode=eye_mode,
-            left_key=r2_key if eye_mode == "left" else None,
-            right_key=r2_key if eye_mode == "right" else None,
-            left_diagnosis=diag if eye_mode == "left" else None,
-            right_diagnosis=diag if eye_mode == "right" else None,
-            status="done",
-        )
-        db.add(scan)
-        db.commit()
-        db.refresh(scan)
-
-        return ScanResult(
-            id=scan.id,
-            eye_mode=scan.eye_mode,
-            left_diagnosis=scan.left_diagnosis,
-            right_diagnosis=scan.right_diagnosis,
-            status=scan.status,
-            error=None,
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        scan = Scan(
-            user_id=user_id,
-            eye_mode=eye_mode,
-            status="failed",
-            error=f"{type(e).__name__}: {str(e)}",
-        )
-        db.add(scan)
-        db.commit()
-        db.refresh(scan)
-
-        detail = scan.error if str(getattr(settings, "DEBUG_ERRORS", "")).strip() == "1" else "Scan failed"
-        return JSONResponse(
-            status_code=500,
-            content={
-                "id": scan.id,
-                "eye_mode": scan.eye_mode,
-                "left_diagnosis": None,
-                "right_diagnosis": None,
-                "status": scan.status,
-                "error": detail,
-            },
-        )

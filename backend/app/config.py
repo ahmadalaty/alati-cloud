@@ -4,29 +4,32 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # Database
     DATABASE_URL: str
-
-    # Auth
+    
+    # JWT for login tokens
     JWT_SECRET: str
-    JWT_ALG: str = "HS256"
-    JWT_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
-
-    # R2 (S3 compatible) - REQUIRED
-    STORAGE_MODE: str = "r2"  # force r2 only
+    
+    # R2 Storage
     R2_ENDPOINT: str
     R2_ACCESS_KEY_ID: str
     R2_SECRET_ACCESS_KEY: str
     R2_BUCKET: str
-
+    STORAGE_MODE: str = "r2"
+    
     # Model
-    MODEL_VARIANT: str = "resnet18"  # resnet18 or resnet50
-
-    # Demo admin seed
-    OWNER_EMAIL: str = "admin@alati.ai"
-    OWNER_PASSWORD: str = "admin123"
-
-    # Debug
-    DEMO_MODE: str = "1"
-    DEBUG_ERRORS: str = "1"
+    MODEL_VARIANT: str = "resnet18"
+    
+    # Admin user (auto-created on startup)
+    OWNER_EMAIL: str = ""
+    OWNER_PASSWORD: str = ""
+    
+    # Debug mode
+    DEBUG_ERRORS: str = "0"
+    
+    # API Token secret (for hashing API tokens)
+    API_TOKEN_SECRET: str = ""
+    
+    class Config:
+        env_file = ".env"
 
 
 settings = Settings()

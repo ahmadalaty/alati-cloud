@@ -1,5 +1,7 @@
 import os
 import time
+import secrets
+import hashlib
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Request
@@ -32,6 +34,7 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def create_token(user_id: int) -> str:
+    """Create JWT token for login"""
     now = int(time.time())
     payload = {
         "sub": str(user_id),
@@ -41,7 +44,30 @@ def create_token(user_id: int) -> str:
     return jwt.encode(payload, settings.JWT_SECRET, algorithm="HS256")
 
 
+# ============ API TOKEN FUNCTIONS ============
+
+def generate_api_token() -> str:
+    """Generate a random API token (shown only once to user)"""
+    return secrets.token_urlsafe(32)
+
+
+def hash_api_token(token: str) -> str:
+    """Hash API token for storage in database"""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def verify_api_token(token: str, token_hash: str) -> bool:
+    """Verify a plaintext token against its hash"""
+    try:
+        return hash_api_token(token) == token_hash
+    except Exception:
+        return False
+
+
+# ============ TOKEN EXTRACTION & VALIDATION ============
+
 def _extract_token(req: Request) -> Optional[str]:
+    """Extract token from Authorization header or query params"""
     # Authorization: Bearer <token>
     auth = req.headers.get("Authorization", "")
     if auth.lower().startswith("bearer "):
@@ -56,15 +82,53 @@ def _extract_token(req: Request) -> Optional[str]:
 
 
 def require_user(req: Request) -> int:
+    """
+    Validate token and return user_id.
+    Accepts both JWT tokens (from login) and API tokens (from admin issuance).
+    """
     token = _extract_token(req)
     if not token:
         raise HTTPException(status_code=401, detail="Missing token")
 
+    # Try JWT first (from login)
     try:
         payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
         sub = payload.get("sub")
-        if not sub:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        return int(sub)
+        if sub:
+            return int(sub)
     except (JWTError, ValueError):
-        raise HTTPException(status_code=401, detail="Invalid token")
+        pass
+
+    # If JWT failed, it might be an API token
+    # For now, we'll mark it as invalid
+    # (API tokens will be checked separately in the scan endpoint)
+    raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def require_admin(req: Request) -> int:
+    """
+    Validate that request is from admin (OWNER_EMAIL/OWNER_PASSWORD).
+    Admin authenticates via email/password in Authorization header.
+    Format: Authorization: Bearer <email>:<password>
+    """
+    token = _extract_token(req)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing admin credentials")
+
+    # Expect format: email:password
+    if ":" not in token:
+        raise HTTPException(status_code=401, detail="Invalid admin format")
+
+    email, password = token.split(":", 1)
+    
+    admin_email = (settings.OWNER_EMAIL or "").strip().lower()
+    admin_password = (settings.OWNER_PASSWORD or "").strip()
+    
+    if not admin_email or not admin_password:
+        raise HTTPException(status_code=500, detail="Admin not configured")
+    
+    if email.lower() != admin_email or password != admin_password:
+        raise HTTPException(status_code=401, detail="Invalid admin credentials")
+    
+    # Return a dummy user_id for admin (0 = admin)
+    return 0

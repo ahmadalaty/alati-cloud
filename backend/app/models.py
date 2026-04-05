@@ -10,6 +10,26 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
 
 
+class APIToken(Base):
+    __tablename__ = "api_tokens"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, index=True, nullable=False)
+    
+    # Token hash (never store plain tokens)
+    token_hash = Column(String(255), unique=True, index=True, nullable=False)
+    
+    # Friendly name for this token (optional)
+    name = Column(String(255), nullable=True)
+    
+    # When created and last used
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Can be revoked
+    is_active = Column(Integer, default=1, nullable=False)  # 1=active, 0=revoked
+
+
 class Scan(Base):
     __tablename__ = "scans"
 
