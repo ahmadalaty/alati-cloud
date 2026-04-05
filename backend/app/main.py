@@ -679,7 +679,7 @@ async function revokeToken(tokenId){
 async function runScan(){
   if(!TOKEN){ setStatus("scanStatus","Please login first.",false); return; }
 
-  // Check if user is banned
+  // Check if user has hit usage limit
   if(USER_USAGE_LIMIT >= 0 && USER_USAGE_COUNT >= USER_USAGE_LIMIT){
     setStatus("scanStatus","Usage limit reached!",false);
     document.getElementById("scanBtn").disabled = true;
@@ -782,9 +782,13 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    # Check if user is banned
-    if user.is_banned:
+    # Use getattr with defaults for missing columns
+    is_banned = getattr(user, 'is_banned', 0)
+    if is_banned:
         raise HTTPException(status_code=403, detail="User account is banned")
+    
+    usage_limit = getattr(user, 'usage_limit', -1)
+    usage_count = getattr(user, 'usage_count', 0)
     
     owner_email = (settings.OWNER_EMAIL or "").strip().lower()
     is_owner = (email == owner_email)
@@ -794,8 +798,8 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
         "is_owner": is_owner,
         "user_id": user.id,
         "email": user.email,
-        "usage_limit": user.usage_limit,
-        "usage_count": user.usage_count,
+        "usage_limit": usage_limit,
+        "usage_count": usage_count,
     }
 
 
@@ -811,9 +815,9 @@ def list_users(req: Request, db: Session = Depends(get_db)):
         {
             "id": u.id,
             "email": u.email,
-            "is_banned": u.is_banned,
-            "usage_limit": u.usage_limit,
-            "usage_count": u.usage_count,
+            "is_banned": getattr(u, 'is_banned', 0),
+            "usage_limit": getattr(u, 'usage_limit', -1),
+            "usage_count": getattr(u, 'usage_count', 0),
         }
         for u in users
     ]
@@ -936,11 +940,13 @@ async def scan_run(
     
     # Check if user is banned
     user = db.query(User).filter(User.id == user_id).first()
-    if not user or user.is_banned:
+    if not user or getattr(user, 'is_banned', 0):
         raise HTTPException(status_code=403, detail="User account is banned")
     
     # Check usage limit
-    if user.usage_limit >= 0 and user.usage_count >= user.usage_limit:
+    usage_limit = getattr(user, 'usage_limit', -1)
+    usage_count = getattr(user, 'usage_count', 0)
+    if usage_limit >= 0 and usage_count >= usage_limit:
         raise HTTPException(status_code=429, detail="Usage limit reached")
     
     eye_mode = (eye_mode or "").strip().lower()
@@ -982,7 +988,7 @@ async def scan_run(
             db.add(scan)
             
             # Increment usage count
-            user.usage_count += 1
+            user.usage_count = getattr(user, 'usage_count', 0) + 1
             db.add(user)
             db.commit()
             db.refresh(scan)
@@ -1020,7 +1026,7 @@ async def scan_run(
         db.add(scan)
         
         # Increment usage count
-        user.usage_count += 1
+        user.usage_count = getattr(user, 'usage_count', 0) + 1
         db.add(user)
         db.commit()
         db.refresh(scan)
