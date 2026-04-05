@@ -701,7 +701,7 @@ async def scan_run(
     file: UploadFile | None = File(None),
     left_file: UploadFile | None = File(None),
     right_file: UploadFile | None = File(None),
-    req: Request = Depends(),
+    req: Request,
     db: Session = Depends(get_db),
 ):
     """Run a scan. Accepts both JWT tokens and API tokens."""
