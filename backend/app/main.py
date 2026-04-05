@@ -787,23 +787,33 @@ def get_all_results(req: Request, db: Session = Depends(get_db)):
     """[ADMIN ONLY] Get all results with analytics"""
     require_admin(req)
     
-    scans = db.query(Scan).filter(Scan.confirmed_at != None).all()
+    # Get all scans
+    all_scans = db.query(Scan).all()
     users_map = {u.id: u.email for u in db.query(User).all()}
     
     results = []
     by_diagnosis = {}
     
-    for scan in scans:
+    for scan in all_scans:
+        # Use getattr to safely access confirmed columns that might not exist
+        confirmed_at = getattr(scan, 'confirmed_at', None)
+        confirmed_left = getattr(scan, 'confirmed_left_diagnosis', None)
+        confirmed_right = getattr(scan, 'confirmed_right_diagnosis', None)
+        
+        # Only process if confirmed
+        if not confirmed_at:
+            continue
+        
         diagnoses = []
         if scan.eye_mode == "both":
             diagnoses = [
-                (scan.left_diagnosis, scan.confirmed_left_diagnosis),
-                (scan.right_diagnosis, scan.confirmed_right_diagnosis),
+                (scan.left_diagnosis, confirmed_left),
+                (scan.right_diagnosis, confirmed_right),
             ]
         elif scan.eye_mode == "left":
-            diagnoses = [(scan.left_diagnosis, scan.confirmed_left_diagnosis)]
+            diagnoses = [(scan.left_diagnosis, confirmed_left)]
         else:
-            diagnoses = [(scan.right_diagnosis, scan.confirmed_right_diagnosis)]
+            diagnoses = [(scan.right_diagnosis, confirmed_right)]
         
         for ai_diag, confirmed_diag in diagnoses:
             if not confirmed_diag:
@@ -814,7 +824,7 @@ def get_all_results(req: Request, db: Session = Depends(get_db)):
                 "doctor_email": users_map.get(scan.user_id, "Unknown"),
                 "ai_diagnosis": ai_diag,
                 "professional_opinion": confirmed_diag,
-                "confirmed_at": scan.confirmed_at,
+                "confirmed_at": confirmed_at,
             })
             
             key = confirmed_diag
@@ -978,8 +988,14 @@ async def scan_run(
             right_diag = predict_debug(right_bytes).get("translated") or "Uncertain"
             
             scan = Scan(
-                user_id=user_id, eye_mode="both", left_key=left_key, right_key=right_key,
-                left_diagnosis=left_diag, right_diagnosis=right_diag, status="done"
+                user_id=user_id, 
+                eye_mode="both", 
+                left_key=left_key, 
+                right_key=right_key,
+                left_diagnosis=left_diag, 
+                right_diagnosis=right_diag, 
+                status="done",
+                error=None
             )
             db.add(scan)
             user.usage_count = getattr(user, 'usage_count', 0) + 1
@@ -1049,13 +1065,18 @@ def confirm_diagnosis(
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     
-    if confirmed_left_diagnosis:
-        scan.confirmed_left_diagnosis = confirmed_left_diagnosis
-    if confirmed_right_diagnosis:
-        scan.confirmed_right_diagnosis = confirmed_right_diagnosis
-    
-    scan.confirmed_at = datetime.utcnow()
-    db.add(scan)
-    db.commit()
+    try:
+        # Try to set confirmed fields (they might not exist yet in older databases)
+        if confirmed_left_diagnosis:
+            scan.confirmed_left_diagnosis = confirmed_left_diagnosis
+        if confirmed_right_diagnosis:
+            scan.confirmed_right_diagnosis = confirmed_right_diagnosis
+        
+        scan.confirmed_at = datetime.utcnow()
+        db.add(scan)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to save: {str(e)}")
     
     return {"status": "saved", "scan_id": scan.id}
