@@ -697,11 +697,11 @@ def revoke_token(token_id: int, req: Request, db: Session = Depends(get_db)):
 
 @app.post("/scan/run", response_model=ScanResult)
 async def scan_run(
+    req: Request,
     eye_mode: str = Form(...),
     file: UploadFile | None = File(None),
     left_file: UploadFile | None = File(None),
     right_file: UploadFile | None = File(None),
-    req: Request,
     db: Session = Depends(get_db),
 ):
     """Run a scan. Accepts both JWT tokens and API tokens."""
