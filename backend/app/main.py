@@ -2,6 +2,7 @@ import hashlib
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from .config import settings
 from .db import Base, engine, get_db, SessionLocal
@@ -42,33 +43,59 @@ def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
-def upsert_admin():
-    """Create admin user on startup if OWNER_EMAIL and OWNER_PASSWORD are set"""
+@app.on_event("startup")
+def startup():
+    """Create tables and add missing columns, then create admin user"""
+    # Create all tables first
+    Base.metadata.create_all(bind=engine)
+    
+    # Add missing columns if they don't exist
+    try:
+        with engine.connect() as conn:
+            # Add is_banned column if missing
+            try:
+                conn.execute(text("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0;"))
+                conn.commit()
+            except Exception as e:
+                # Column already exists, ignore error
+                pass
+            
+            # Add usage_limit column if missing
+            try:
+                conn.execute(text("ALTER TABLE users ADD COLUMN usage_limit INTEGER DEFAULT -1;"))
+                conn.commit()
+            except Exception as e:
+                # Column already exists, ignore error
+                pass
+            
+            # Add usage_count column if missing
+            try:
+                conn.execute(text("ALTER TABLE users ADD COLUMN usage_count INTEGER DEFAULT 0;"))
+                conn.commit()
+            except Exception as e:
+                # Column already exists, ignore error
+                pass
+    except Exception as e:
+        print(f"Error adding columns: {e}")
+    
+    # Create admin user
     db = SessionLocal()
     try:
         email = (settings.OWNER_EMAIL or "").strip().lower()
         password = (settings.OWNER_PASSWORD or "").strip()
-        if not email or not password:
-            return
-
-        password = password[:72]  # passlib/bcrypt max 72 bytes
-
-        user = db.query(User).filter(User.email == email).first()
-        if not user:
-            user = User(email=email, password_hash=hash_password(password))
-            db.add(user)
-            db.commit()
-        else:
-            user.password_hash = hash_password(password)
-            db.add(user)
-            db.commit()
+        if email and password:
+            password = password[:72]
+            user = db.query(User).filter(User.email == email).first()
+            if not user:
+                user = User(email=email, password_hash=hash_password(password))
+                db.add(user)
+                db.commit()
+            else:
+                user.password_hash = hash_password(password)
+                db.add(user)
+                db.commit()
     finally:
         db.close()
-
-
-@app.on_event("startup")
-def startup():
-    upsert_admin()
 
 
 @app.get("/health")
@@ -793,13 +820,8 @@ def list_users(req: Request, db: Session = Depends(get_db)):
 
 
 @app.put("/admin/users/{user_id}")
-def update_user(user_id: int, is_banned: int = None, usage_limit: int = None, req: Request = None, db: Session = Depends(get_db)):
+def update_user(user_id: int, req: Request, db: Session = Depends(get_db), is_banned: int = None, usage_limit: int = None):
     """[ADMIN ONLY] Ban/unban user or set usage limit"""
-    req_obj = Request({"type": "http", "headers": {}, "query_string": b""})
-    # Get request from dependency
-    from fastapi import Request as FastAPIRequest
-    
-    # We need to pass request differently
     require_admin(req)
     
     user = db.query(User).filter(User.id == user_id).first()
