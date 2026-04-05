@@ -144,6 +144,7 @@ def ui():
     .badge{display:inline-block;padding:4px 8px;border-radius:6px;font-size:12px;background:rgba(51,93,255,.3);}
     .badge.active{background:rgba(103,255,177,.3);color:#67ffb1;}
     .badge.inactive{background:rgba(255,138,138,.3);color:#ff8a8a;}
+    .badge.banned{background:rgba(255,107,107,.3);color:#ff6b6b;}
     .flex-between{display:flex;justify-content:space-between;align-items:center;}
     .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
     @media(max-width:768px){.grid-2{grid-template-columns:1fr;}}
@@ -167,7 +168,7 @@ def ui():
     <div id="registerTab" style="display:none;">
       <label>Email</label>
       <input id="regEmail" placeholder="user@example.com"/>
-      <label>Password (optional)</label>
+      <label>Password</label>
       <input id="regPassword" type="password" placeholder="••••••••"/>
       <div style="height:10px"></div>
       <button onclick="doRegister()">Register</button>
@@ -184,6 +185,25 @@ def ui():
         <button onclick="switchToTesting()">🧪 Test AI</button>
         <button onclick="doLogout()" class="secondary" style="margin-left:8px;">Logout</button>
       </div>
+    </div>
+
+    <!-- Manage Users Section -->
+    <div style="margin-top:20px;">
+      <h3>👥 Manage Users</h3>
+      <button onclick="loadUsers()" style="margin-bottom:12px;">Refresh</button>
+      <table class="table" id="usersTable">
+        <thead>
+          <tr>
+            <th>User ID</th>
+            <th>Email</th>
+            <th>Usage</th>
+            <th>Limit</th>
+            <th>Status</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="usersList"></tbody>
+      </table>
     </div>
 
     <!-- Issue Token Section -->
@@ -228,7 +248,10 @@ def ui():
   <!-- SCAN CARD (for regular users and testing) -->
   <div class="card" id="scanCard" style="display:none;">
     <div class="flex-between">
-      <h3 style="margin:0;">Eye Scan</h3>
+      <div>
+        <h3 style="margin:0;">Eye Scan</h3>
+        <p id="usageInfo" class="muted" style="margin:4px 0 0;"></p>
+      </div>
       <div>
         <button id="backBtn" onclick="backToAdmin()" class="secondary" style="display:none;margin-right:8px;">← Back to Admin</button>
         <button onclick="doLogout()" class="secondary">Logout</button>
@@ -268,7 +291,7 @@ def ui():
     </div>
 
     <div style="height:10px"></div>
-    <button onclick="runScan()">Analyze</button>
+    <button id="scanBtn" onclick="runScan()">Analyze</button>
     <p id="scanStatus" class="muted"></p>
 
     <div class="result" id="resultBox" style="display:none;">
@@ -284,6 +307,9 @@ let TOKEN = null;
 let IS_OWNER = false;
 let OWNER_EMAIL = "";
 let OWNER_PASSWORD = "";
+let USER_ID = null;
+let USER_USAGE_LIMIT = -1;
+let USER_USAGE_COUNT = 0;
 let SOURCE = "upload";
 
 function setStatus(id, msg, ok=null){
@@ -334,10 +360,24 @@ function refreshInputs(){
   applyCapture();
 }
 
+function updateUsageInfo(){
+  const info = document.getElementById("usageInfo");
+  if(USER_USAGE_LIMIT === -1){
+    info.textContent = "Unlimited scans";
+  } else {
+    info.textContent = `Usage: ${USER_USAGE_COUNT} / ${USER_USAGE_LIMIT} scans`;
+  }
+}
+
 async function doRegister(){
   setStatus("authStatus","Registering…");
   const email = document.getElementById("regEmail").value.trim();
   const password = document.getElementById("regPassword").value;
+
+  if(!password){
+    setStatus("authStatus","Password is required",false);
+    return;
+  }
 
   try{
     const r = await fetch("/auth/register",{
@@ -369,6 +409,9 @@ async function doLogin(){
     if(!r.ok) throw new Error(data.detail || "Login failed");
     TOKEN = data.access_token;
     IS_OWNER = data.is_owner || false;
+    USER_ID = data.user_id;
+    USER_USAGE_LIMIT = data.usage_limit || -1;
+    USER_USAGE_COUNT = data.usage_count || 0;
 
     setStatus("authStatus","Login OK ✅",true);
     document.getElementById("authCard").style.display="none";
@@ -378,10 +421,12 @@ async function doLogin(){
       OWNER_PASSWORD = password;
       document.getElementById("adminCard").style.display="block";
       document.getElementById("backBtn").style.display="none";
+      loadUsers();
       loadTokens();
     } else {
       document.getElementById("scanCard").style.display="block";
       document.getElementById("backBtn").style.display="none";
+      updateUsageInfo();
       refreshInputs();
     }
   }catch(e){
@@ -395,6 +440,7 @@ function doLogout(){
   IS_OWNER = false;
   OWNER_EMAIL = "";
   OWNER_PASSWORD = "";
+  USER_ID = null;
   document.getElementById("authCard").style.display="block";
   document.getElementById("adminCard").style.display="none";
   document.getElementById("scanCard").style.display="none";
@@ -408,6 +454,7 @@ function switchToTesting(){
   document.getElementById("adminCard").style.display="none";
   document.getElementById("scanCard").style.display="block";
   document.getElementById("backBtn").style.display="block";
+  updateUsageInfo();
   refreshInputs();
 }
 
@@ -415,6 +462,86 @@ function backToAdmin(){
   document.getElementById("scanCard").style.display="none";
   document.getElementById("adminCard").style.display="block";
   document.getElementById("backBtn").style.display="none";
+}
+
+async function loadUsers(){
+  if(!OWNER_EMAIL || !OWNER_PASSWORD) return;
+  
+  const authHeader = "Bearer " + OWNER_EMAIL + ":" + OWNER_PASSWORD;
+  
+  try{
+    const r = await fetch("/admin/users", {
+      headers: {"Authorization": authHeader}
+    });
+    if(!r.ok) throw new Error("Failed to load users");
+    const users = await r.json();
+    displayUsers(users);
+  }catch(e){
+    console.error("Error loading users:", e);
+  }
+}
+
+function displayUsers(users){
+  const tbody = document.getElementById("usersList");
+  tbody.innerHTML = "";
+  
+  if(!users || users.length === 0){
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;opacity:.5;">No users</td></tr>';
+    return;
+  }
+  
+  users.forEach(user => {
+    const row = document.createElement("tr");
+    const status = user.is_banned ? '<span class="badge banned">Banned</span>' : '<span class="badge active">Active</span>';
+    const limitText = user.usage_limit === -1 ? '∞' : user.usage_limit;
+    
+    row.innerHTML = `
+      <td>${user.id}</td>
+      <td>${user.email}</td>
+      <td>${user.usage_count}</td>
+      <td>${limitText}</td>
+      <td>${status}</td>
+      <td>
+        <button class="secondary" onclick="showUserModal(${user.id}, '${user.email}', ${user.is_banned}, ${user.usage_limit})" style="font-size:12px;padding:6px 12px;">Edit</button>
+      </td>
+    `;
+    tbody.appendChild(row);
+  });
+}
+
+function showUserModal(userId, email, isBanned, usageLimit){
+  const action = isBanned ? "Unban" : "Ban";
+  const newLimit = prompt(`Set usage limit for ${email}:\n(Enter -1 for unlimited, or a number like 100)`, usageLimit);
+  
+  if(newLimit === null) return;
+  
+  const limit = parseInt(newLimit);
+  if(isNaN(limit)){
+    alert("Invalid number");
+    return;
+  }
+  
+  banUser(userId, isBanned ? 0 : 1, limit);
+}
+
+async function banUser(userId, isBanned, usageLimit){
+  const authHeader = "Bearer " + OWNER_EMAIL + ":" + OWNER_PASSWORD;
+
+  try{
+    const r = await fetch("/admin/users/" + userId, {
+      method: "PUT",
+      headers: {
+        "Authorization": authHeader,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({is_banned: isBanned, usage_limit: usageLimit})
+    });
+    if(!r.ok) throw new Error("Failed to update user");
+    alert("User updated!");
+    loadUsers();
+  }catch(e){
+    alert("Error: " + e.message);
+  }
 }
 
 async function loadTokens(){
@@ -525,6 +652,13 @@ async function revokeToken(tokenId){
 async function runScan(){
   if(!TOKEN){ setStatus("scanStatus","Please login first.",false); return; }
 
+  // Check if user is banned
+  if(USER_USAGE_LIMIT >= 0 && USER_USAGE_COUNT >= USER_USAGE_LIMIT){
+    setStatus("scanStatus","Usage limit reached!",false);
+    document.getElementById("scanBtn").disabled = true;
+    return;
+  }
+
   const mode = document.getElementById("eyeMode").value;
   const fd = new FormData();
   fd.append("eye_mode", mode);
@@ -558,6 +692,8 @@ async function runScan(){
       document.getElementById("diagText").textContent = data.error || "Unknown error";
     }else{
       setStatus("scanStatus","Done ✅",true);
+      USER_USAGE_COUNT++;
+      updateUsageInfo();
 
       let txt = "";
       if(data.eye_mode === "both"){
@@ -586,31 +722,27 @@ async function runScan(){
 
 @app.post("/auth/register")
 def register(body: RegisterRequest, db: Session = Depends(get_db)):
-    """Register a new user with email and optional password"""
+    """Register a new user with email and password"""
     email = (body.email or "").strip().lower()
     
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="Invalid email")
     
-    # Check if user exists
     existing = db.query(User).filter(User.email == email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    # Password can be empty initially (admin will issue tokens)
     password = (body.password or "").strip()
     if not password:
-        password = "placeholder"  # Set a placeholder password
+        raise HTTPException(status_code=400, detail="Password is required")
     
-    password = password[:72]  # passlib max 72 bytes
+    password = password[:72]
     
-    # Create user
     user = User(email=email, password_hash=hash_password(password))
     db.add(user)
     db.commit()
     db.refresh(user)
     
-    # Return a JWT token so they can test immediately (optional)
     return {"access_token": create_token(user.id)}
 
 
@@ -619,10 +751,14 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     """Login with email and password"""
     email = (body.email or "").strip().lower()
     user = db.query(User).filter(User.email == email).first()
+    
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    # Check if this is the owner
+    # Check if user is banned
+    if user.is_banned:
+        raise HTTPException(status_code=403, detail="User account is banned")
+    
     owner_email = (settings.OWNER_EMAIL or "").strip().lower()
     is_owner = (email == owner_email)
     
@@ -630,8 +766,55 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
         "access_token": create_token(user.id),
         "is_owner": is_owner,
         "user_id": user.id,
-        "email": user.email
+        "email": user.email,
+        "usage_limit": user.usage_limit,
+        "usage_count": user.usage_count,
     }
+
+
+# ============ ADMIN USER MANAGEMENT ============
+
+@app.get("/admin/users")
+def list_users(req: Request, db: Session = Depends(get_db)):
+    """[ADMIN ONLY] List all users"""
+    require_admin(req)
+    
+    users = db.query(User).all()
+    return [
+        {
+            "id": u.id,
+            "email": u.email,
+            "is_banned": u.is_banned,
+            "usage_limit": u.usage_limit,
+            "usage_count": u.usage_count,
+        }
+        for u in users
+    ]
+
+
+@app.put("/admin/users/{user_id}")
+def update_user(user_id: int, is_banned: int = None, usage_limit: int = None, req: Request = None, db: Session = Depends(get_db)):
+    """[ADMIN ONLY] Ban/unban user or set usage limit"""
+    req_obj = Request({"type": "http", "headers": {}, "query_string": b""})
+    # Get request from dependency
+    from fastapi import Request as FastAPIRequest
+    
+    # We need to pass request differently
+    require_admin(req)
+    
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if is_banned is not None:
+        user.is_banned = is_banned
+    if usage_limit is not None:
+        user.usage_limit = usage_limit
+    
+    db.add(user)
+    db.commit()
+    
+    return {"status": "updated"}
 
 
 # ============ ADMIN TOKEN MANAGEMENT ============
@@ -642,26 +825,16 @@ def issue_token(
     req: Request,
     db: Session = Depends(get_db)
 ):
-    """
-    [ADMIN ONLY] Issue a new API token to a user.
-    
-    Authentication: 
-      Authorization: Bearer email:password
-      where email/password is OWNER_EMAIL/OWNER_PASSWORD from config
-    """
-    # Verify admin
+    """[ADMIN ONLY] Issue a new API token to a user"""
     require_admin(req)
     
-    # Check user exists
     user = db.query(User).filter(User.id == body.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Generate token
     plain_token = generate_api_token()
     token_hash = hash_api_token(plain_token)
     
-    # Store in database
     api_token = APIToken(
         user_id=body.user_id,
         token_hash=token_hash,
@@ -672,7 +845,7 @@ def issue_token(
     db.refresh(api_token)
     
     return IssuedTokenResponse(
-        token=plain_token,  # Only shown once!
+        token=plain_token,
         token_id=api_token.id,
         user_id=api_token.user_id,
         created_at=api_token.created_at,
@@ -681,12 +854,7 @@ def issue_token(
 
 @app.get("/admin/tokens", response_model=list[APITokenResponse])
 def list_tokens(req: Request, db: Session = Depends(get_db)):
-    """
-    [ADMIN ONLY] List all API tokens in the system.
-    
-    Authentication:
-      Authorization: Bearer email:password
-    """
+    """[ADMIN ONLY] List all API tokens"""
     require_admin(req)
     
     tokens = db.query(APIToken).all()
@@ -695,12 +863,7 @@ def list_tokens(req: Request, db: Session = Depends(get_db)):
 
 @app.delete("/admin/tokens/{token_id}")
 def revoke_token(token_id: int, req: Request, db: Session = Depends(get_db)):
-    """
-    [ADMIN ONLY] Revoke (deactivate) an API token.
-    
-    Authentication:
-      Authorization: Bearer email:password
-    """
+    """[ADMIN ONLY] Revoke an API token"""
     require_admin(req)
     
     token = db.query(APIToken).filter(APIToken.id == token_id).first()
@@ -714,7 +877,7 @@ def revoke_token(token_id: int, req: Request, db: Session = Depends(get_db)):
     return {"status": "revoked", "token_id": token_id}
 
 
-# ============ SCAN ENDPOINT (SUPPORTS BOTH JWT AND API TOKENS) ============
+# ============ SCAN ENDPOINT ============
 
 @app.post("/scan/run", response_model=ScanResult)
 async def scan_run(
@@ -725,16 +888,14 @@ async def scan_run(
     right_file: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
-    """Run a scan. Accepts both JWT tokens and API tokens."""
+    """Run a scan. Accepts both JWT tokens and API tokens"""
     
-    # Extract token
     token = _extract_token(req)
     if not token:
         raise HTTPException(status_code=401, detail="Missing token")
     
     user_id = None
     
-    # Try JWT first
     try:
         from jose import jwt
         payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
@@ -742,7 +903,6 @@ async def scan_run(
     except:
         pass
     
-    # If JWT failed, try API token
     if not user_id:
         api_token = db.query(APIToken).filter(APIToken.token_hash == hash_api_token(token)).first()
         if not api_token or not api_token.is_active:
@@ -751,6 +911,15 @@ async def scan_run(
     
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token")
+    
+    # Check if user is banned
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or user.is_banned:
+        raise HTTPException(status_code=403, detail="User account is banned")
+    
+    # Check usage limit
+    if user.usage_limit >= 0 and user.usage_count >= user.usage_limit:
+        raise HTTPException(status_code=429, detail="Usage limit reached")
     
     eye_mode = (eye_mode or "").strip().lower()
     if eye_mode not in ("left", "right", "both"):
@@ -779,16 +948,6 @@ async def scan_run(
             left_diag = left_dbg.get("translated") or "Uncertain"
             right_diag = right_dbg.get("translated") or "Uncertain"
 
-            print(
-                "[AI RAW BOTH]",
-                "L_sha=", _sha256(left_bytes)[:12],
-                "L_final=", left_dbg.get("final_code"), left_dbg.get("final_reason"),
-                "L_top3=", left_dbg.get("top3"),
-                "| R_sha=", _sha256(right_bytes)[:12],
-                "R_final=", right_dbg.get("final_code"), right_dbg.get("final_reason"),
-                "R_top3=", right_dbg.get("top3"),
-            )
-
             scan = Scan(
                 user_id=user_id,
                 eye_mode="both",
@@ -799,6 +958,10 @@ async def scan_run(
                 status="done",
             )
             db.add(scan)
+            
+            # Increment usage count
+            user.usage_count += 1
+            db.add(user)
             db.commit()
             db.refresh(scan)
 
@@ -811,7 +974,6 @@ async def scan_run(
                 error=None,
             )
 
-        # single eye
         if file is None:
             raise HTTPException(400, detail="file required for left/right")
 
@@ -824,19 +986,6 @@ async def scan_run(
         dbg = predict_debug(image_bytes)
         diag = dbg.get("translated") or "Uncertain"
 
-        print(
-            "[AI RAW ONE]",
-            "mode=", eye_mode,
-            "len=", len(image_bytes),
-            "sha=", _sha256(image_bytes)[:12],
-            "top_code=", dbg.get("top_code"),
-            "top_prob=", dbg.get("top_prob"),
-            "top3=", dbg.get("top3"),
-            "final_code=", dbg.get("final_code"),
-            "reason=", dbg.get("final_reason"),
-            "final_diag=", diag,
-        )
-
         scan = Scan(
             user_id=user_id,
             eye_mode=eye_mode,
@@ -847,6 +996,10 @@ async def scan_run(
             status="done",
         )
         db.add(scan)
+        
+        # Increment usage count
+        user.usage_count += 1
+        db.add(user)
         db.commit()
         db.refresh(scan)
 
