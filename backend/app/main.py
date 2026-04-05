@@ -180,7 +180,10 @@ def ui():
   <div class="card" id="adminCard" style="display:none;border-color:#ffc107;border-width:2px;">
     <div class="flex-between">
       <h2>👑 Admin Dashboard</h2>
-      <button onclick="doLogout()" class="secondary">Logout</button>
+      <div>
+        <button onclick="switchToTesting()">🧪 Test AI</button>
+        <button onclick="doLogout()" class="secondary" style="margin-left:8px;">Logout</button>
+      </div>
     </div>
 
     <!-- Issue Token Section -->
@@ -222,11 +225,14 @@ def ui():
     </div>
   </div>
 
-  <!-- SCAN CARD (only for regular users) -->
+  <!-- SCAN CARD (for regular users and testing) -->
   <div class="card" id="scanCard" style="display:none;">
     <div class="flex-between">
       <h3 style="margin:0;">Eye Scan</h3>
-      <button onclick="doLogout()" class="secondary">Logout</button>
+      <div>
+        <button id="backBtn" onclick="backToAdmin()" class="secondary" style="display:none;margin-right:8px;">← Back to Admin</button>
+        <button onclick="doLogout()" class="secondary">Logout</button>
+      </div>
     </div>
 
     <label>Eye mode</label>
@@ -371,9 +377,11 @@ async function doLogin(){
       OWNER_EMAIL = email;
       OWNER_PASSWORD = password;
       document.getElementById("adminCard").style.display="block";
+      document.getElementById("backBtn").style.display="none";
       loadTokens();
     } else {
       document.getElementById("scanCard").style.display="block";
+      document.getElementById("backBtn").style.display="none";
       refreshInputs();
     }
   }catch(e){
@@ -394,6 +402,19 @@ function doLogout(){
   document.getElementById("registerTab").style.display="none";
   document.getElementById("email").value = "";
   document.getElementById("password").value = "";
+}
+
+function switchToTesting(){
+  document.getElementById("adminCard").style.display="none";
+  document.getElementById("scanCard").style.display="block";
+  document.getElementById("backBtn").style.display="block";
+  refreshInputs();
+}
+
+function backToAdmin(){
+  document.getElementById("scanCard").style.display="none";
+  document.getElementById("adminCard").style.display="block";
+  document.getElementById("backBtn").style.display="none";
 }
 
 async function loadTokens(){
