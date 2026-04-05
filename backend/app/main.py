@@ -24,6 +24,7 @@ from .auth import (
     generate_api_token,
     hash_api_token,
     verify_api_token,
+    _extract_token,
 )
 from .storage_r2 import new_upload_id, key_for, put_bytes, BUILD_MARKER as STORAGE_MARKER
 from .inference import (
@@ -558,3 +559,307 @@ async function runScan(){
 </body>
 </html>
 """
+
+
+# ============ AUTH ENDPOINTS ============
+
+@app.post("/auth/register")
+def register(body: RegisterRequest, db: Session = Depends(get_db)):
+    """Register a new user with email and optional password"""
+    email = (body.email or "").strip().lower()
+    
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Invalid email")
+    
+    # Check if user exists
+    existing = db.query(User).filter(User.email == email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Password can be empty initially (admin will issue tokens)
+    password = (body.password or "").strip()
+    if not password:
+        password = "placeholder"  # Set a placeholder password
+    
+    password = password[:72]  # passlib max 72 bytes
+    
+    # Create user
+    user = User(email=email, password_hash=hash_password(password))
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    
+    # Return a JWT token so they can test immediately (optional)
+    return {"access_token": create_token(user.id)}
+
+
+@app.post("/auth/login")
+def login(body: LoginRequest, db: Session = Depends(get_db)):
+    """Login with email and password"""
+    email = (body.email or "").strip().lower()
+    user = db.query(User).filter(User.email == email).first()
+    if not user or not verify_password(body.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Check if this is the owner
+    owner_email = (settings.OWNER_EMAIL or "").strip().lower()
+    is_owner = (email == owner_email)
+    
+    return {
+        "access_token": create_token(user.id),
+        "is_owner": is_owner,
+        "user_id": user.id,
+        "email": user.email
+    }
+
+
+# ============ ADMIN TOKEN MANAGEMENT ============
+
+@app.post("/admin/tokens/issue", response_model=IssuedTokenResponse)
+def issue_token(
+    body: IssueTokenRequest, 
+    req: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    [ADMIN ONLY] Issue a new API token to a user.
+    
+    Authentication: 
+      Authorization: Bearer email:password
+      where email/password is OWNER_EMAIL/OWNER_PASSWORD from config
+    """
+    # Verify admin
+    require_admin(req)
+    
+    # Check user exists
+    user = db.query(User).filter(User.id == body.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Generate token
+    plain_token = generate_api_token()
+    token_hash = hash_api_token(plain_token)
+    
+    # Store in database
+    api_token = APIToken(
+        user_id=body.user_id,
+        token_hash=token_hash,
+        name=body.name,
+    )
+    db.add(api_token)
+    db.commit()
+    db.refresh(api_token)
+    
+    return IssuedTokenResponse(
+        token=plain_token,  # Only shown once!
+        token_id=api_token.id,
+        user_id=api_token.user_id,
+        created_at=api_token.created_at,
+    )
+
+
+@app.get("/admin/tokens", response_model=list[APITokenResponse])
+def list_tokens(req: Request, db: Session = Depends(get_db)):
+    """
+    [ADMIN ONLY] List all API tokens in the system.
+    
+    Authentication:
+      Authorization: Bearer email:password
+    """
+    require_admin(req)
+    
+    tokens = db.query(APIToken).all()
+    return tokens
+
+
+@app.delete("/admin/tokens/{token_id}")
+def revoke_token(token_id: int, req: Request, db: Session = Depends(get_db)):
+    """
+    [ADMIN ONLY] Revoke (deactivate) an API token.
+    
+    Authentication:
+      Authorization: Bearer email:password
+    """
+    require_admin(req)
+    
+    token = db.query(APIToken).filter(APIToken.id == token_id).first()
+    if not token:
+        raise HTTPException(status_code=404, detail="Token not found")
+    
+    token.is_active = 0
+    db.add(token)
+    db.commit()
+    
+    return {"status": "revoked", "token_id": token_id}
+
+
+# ============ SCAN ENDPOINT (SUPPORTS BOTH JWT AND API TOKENS) ============
+
+@app.post("/scan/run", response_model=ScanResult)
+async def scan_run(
+    eye_mode: str = Form(...),
+    file: UploadFile | None = File(None),
+    left_file: UploadFile | None = File(None),
+    right_file: UploadFile | None = File(None),
+    req: Request = Depends(),
+    db: Session = Depends(get_db),
+):
+    """Run a scan. Accepts both JWT tokens and API tokens."""
+    
+    # Extract token
+    token = _extract_token(req)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token")
+    
+    user_id = None
+    
+    # Try JWT first
+    try:
+        from jose import jwt
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
+        user_id = int(payload.get("sub", 0))
+    except:
+        pass
+    
+    # If JWT failed, try API token
+    if not user_id:
+        api_token = db.query(APIToken).filter(APIToken.token_hash == hash_api_token(token)).first()
+        if not api_token or not api_token.is_active:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user_id = api_token.user_id
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    eye_mode = (eye_mode or "").strip().lower()
+    if eye_mode not in ("left", "right", "both"):
+        raise HTTPException(400, detail="eye_mode must be left/right/both")
+
+    try:
+        if eye_mode == "both":
+            if left_file is None or right_file is None:
+                raise HTTPException(400, detail="left_file and right_file required")
+
+            left_id = new_upload_id()
+            right_id = new_upload_id()
+
+            left_bytes = await left_file.read()
+            right_bytes = await right_file.read()
+
+            left_key = key_for("left", left_id)
+            right_key = key_for("right", right_id)
+
+            put_bytes(left_key, left_bytes, left_file.content_type or "image/jpeg")
+            put_bytes(right_key, right_bytes, right_file.content_type or "image/jpeg")
+
+            left_dbg = predict_debug(left_bytes)
+            right_dbg = predict_debug(right_bytes)
+
+            left_diag = left_dbg.get("translated") or "Uncertain"
+            right_diag = right_dbg.get("translated") or "Uncertain"
+
+            print(
+                "[AI RAW BOTH]",
+                "L_sha=", _sha256(left_bytes)[:12],
+                "L_final=", left_dbg.get("final_code"), left_dbg.get("final_reason"),
+                "L_top3=", left_dbg.get("top3"),
+                "| R_sha=", _sha256(right_bytes)[:12],
+                "R_final=", right_dbg.get("final_code"), right_dbg.get("final_reason"),
+                "R_top3=", right_dbg.get("top3"),
+            )
+
+            scan = Scan(
+                user_id=user_id,
+                eye_mode="both",
+                left_key=left_key,
+                right_key=right_key,
+                left_diagnosis=left_diag,
+                right_diagnosis=right_diag,
+                status="done",
+            )
+            db.add(scan)
+            db.commit()
+            db.refresh(scan)
+
+            return ScanResult(
+                id=scan.id,
+                eye_mode=scan.eye_mode,
+                left_diagnosis=scan.left_diagnosis,
+                right_diagnosis=scan.right_diagnosis,
+                status=scan.status,
+                error=None,
+            )
+
+        # single eye
+        if file is None:
+            raise HTTPException(400, detail="file required for left/right")
+
+        upload_id = new_upload_id()
+        image_bytes = await file.read()
+
+        r2_key = key_for(eye_mode, upload_id)
+        put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
+
+        dbg = predict_debug(image_bytes)
+        diag = dbg.get("translated") or "Uncertain"
+
+        print(
+            "[AI RAW ONE]",
+            "mode=", eye_mode,
+            "len=", len(image_bytes),
+            "sha=", _sha256(image_bytes)[:12],
+            "top_code=", dbg.get("top_code"),
+            "top_prob=", dbg.get("top_prob"),
+            "top3=", dbg.get("top3"),
+            "final_code=", dbg.get("final_code"),
+            "reason=", dbg.get("final_reason"),
+            "final_diag=", diag,
+        )
+
+        scan = Scan(
+            user_id=user_id,
+            eye_mode=eye_mode,
+            left_key=r2_key if eye_mode == "left" else None,
+            right_key=r2_key if eye_mode == "right" else None,
+            left_diagnosis=diag if eye_mode == "left" else None,
+            right_diagnosis=diag if eye_mode == "right" else None,
+            status="done",
+        )
+        db.add(scan)
+        db.commit()
+        db.refresh(scan)
+
+        return ScanResult(
+            id=scan.id,
+            eye_mode=scan.eye_mode,
+            left_diagnosis=scan.left_diagnosis,
+            right_diagnosis=scan.right_diagnosis,
+            status=scan.status,
+            error=None,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        scan = Scan(
+            user_id=user_id,
+            eye_mode=eye_mode,
+            status="failed",
+            error=f"{type(e).__name__}: {str(e)}",
+        )
+        db.add(scan)
+        db.commit()
+        db.refresh(scan)
+
+        detail = scan.error if str(getattr(settings, "DEBUG_ERRORS", "")).strip() == "1" else "Scan failed"
+        return JSONResponse(
+            status_code=500,
+            content={
+                "id": scan.id,
+                "eye_mode": scan.eye_mode,
+                "left_diagnosis": None,
+                "right_diagnosis": None,
+                "status": scan.status,
+                "error": detail,
+            },
+        )
