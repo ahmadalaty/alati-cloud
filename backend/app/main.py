@@ -200,6 +200,7 @@ def get_html_ui():
     <div class="flex-between">
       <h2>👑 Owner Dashboard</h2>
       <div>
+        <button onclick="switchToTest()" class="success">🧪 Test AI</button>
         <button onclick="showSection('results')">📊 Results</button>
         <button onclick="showSection('users')">👥 Users</button>
         <button onclick="showSection('tokens')">🔑 Tokens</button>
@@ -271,11 +272,14 @@ def get_html_ui():
     </div>
   </div>
 
-  <!-- SCAN CARD (DOCTORS) -->
+  <!-- SCAN CARD (DOCTORS & OWNER TESTING) -->
   <div class="card" id="scanCard" style="display:none;">
     <div class="flex-between">
       <h3 style="margin:0;">Patient Eye Scan</h3>
-      <button onclick="doLogout()" class="secondary">Logout</button>
+      <div>
+        <button id="backBtn" onclick="backToAdmin()" class="secondary" style="display:none;margin-right:8px;">← Back to Admin</button>
+        <button onclick="doLogout()" class="secondary">Logout</button>
+      </div>
     </div>
 
     <label>Eye</label>
@@ -343,6 +347,18 @@ function showSection(sec){
   if(sec==="results") loadResults();
   if(sec==="users") loadUsers();
   if(sec==="tokens") loadTokens();
+}
+
+function switchToTest(){
+  document.getElementById("adminCard").style.display = "none";
+  document.getElementById("scanCard").style.display = "block";
+  document.getElementById("backBtn").style.display = "block";
+}
+
+function backToAdmin(){
+  document.getElementById("scanCard").style.display = "none";
+  document.getElementById("adminCard").style.display = "block";
+  document.getElementById("backBtn").style.display = "none";
 }
 
 function showLogin(){
