@@ -37,7 +37,7 @@ from .inference import (
     ACTIVE_VARIANT,
 )
 
-app = FastAPI(title="Alati Cloud Demo (No Worker, R2-only)")
+app = FastAPI(title="Alati Cloud - Eye Disease Screening")
 Base.metadata.create_all(bind=engine)
 
 
@@ -129,7 +129,7 @@ def get_html_ui():
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Alati Cloud - Eye Scan AI</title>
+  <title>Alati Cloud - Eye Disease Screening</title>
   <style>
     *{box-sizing:border-box;}
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#0b1020;color:#e8ecff;}
@@ -160,16 +160,11 @@ def get_html_ui():
     .badge.pending{background:rgba(255,193,7,.3);color:#ffc107;}
     .badge.banned{background:rgba(255,107,107,.3);color:#ff6b6b;}
     .flex-between{display:flex;justify-content:space-between;align-items:center;gap:12px;}
-    .modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.8);z-index:1000;justify-content:center;align-items:center;}
-    .modal.show{display:flex;}
-    .modal-content{background:#0b1020;border:2px solid #355dff;border-radius:16px;padding:24px;max-width:600px;width:90%;}
-    .row{display:flex;gap:12px;}
-    .row>div{flex:1;}
     .user-row{display:flex;gap:12px;align-items:center;padding:12px;background:rgba(0,0,0,.2);border-radius:8px;margin-bottom:12px;}
     .user-row>div{flex:1;}
-    .user-controls{display:flex;gap:8px;}
+    .user-controls{display:flex;gap:8px;align-items:center;}
     .user-controls input,.user-controls select{width:auto;flex:1;max-width:120px;}
-    @media(max-width:768px){.row{flex-direction:column;}.user-row{flex-direction:column;}}
+    @media(max-width:768px){.user-row{flex-direction:column;}}
   </style>
 </head>
 <body>
@@ -254,12 +249,12 @@ def get_html_ui():
       <h3>🔑 API Tokens</h3>
       <div style="margin:12px 0;">
         <h4>Issue New Token</h4>
-        <div class="row">
-          <div>
+        <div style="display:flex;gap:12px;margin-bottom:12px;">
+          <div style="flex:1;">
             <label>User ID</label>
             <input id="tokenUserId" type="number" placeholder="User ID"/>
           </div>
-          <div>
+          <div style="flex:1;">
             <label>Token Name</label>
             <input id="tokenName" placeholder="e.g., Production API"/>
           </div>
@@ -411,6 +406,12 @@ async function loadUsers() {
       headers: {'Authorization': `Bearer ${currentToken}`}
     });
     const users = await res.json();
+    
+    if (!Array.isArray(users)) {
+      document.getElementById('usersList').innerHTML = '<p class="bad">Error: Invalid response from server</p>';
+      return;
+    }
+    
     let html = '';
     for (const user of users) {
       const isAdmin = user.id === parseInt(currentUserId);
@@ -532,6 +533,34 @@ async function revokeToken(tokenId) {
   } catch(e) {
     alert('Error: ' + e.message);
   }
+}
+
+async function loadResults() {
+  try {
+    const res = await fetch('/results/all', {
+      headers: {'Authorization': `Bearer ${currentToken}`}
+    });
+    const results = await res.json();
+    let html = '';
+    for (const r of results) {
+      const match = r.ai_diagnosis === r.professional_opinion ? '✓' : '✗';
+      html += `<tr>
+        <td>${r.id}</td>
+        <td>${r.doctor_email}</td>
+        <td>${r.ai_diagnosis}</td>
+        <td>${r.professional_opinion}</td>
+        <td>${match}</td>
+        <td>${new Date(r.created_at).toLocaleDateString()}</td>
+      </tr>`;
+    }
+    document.getElementById('resultsList').innerHTML = html || '<tr><td colspan="6" class="muted">No results</td></tr>';
+  } catch(e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+function exportResults() {
+  alert('Export feature coming soon');
 }
 
 async function runScan() {
@@ -691,14 +720,26 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
 
 @app.get("/admin/users")
 def list_users(req: Request, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] List all users"""
+    """[ADMIN ONLY] List all users with their management data"""
     require_admin(req)
-    return db.query(User).all()
+    users = db.query(User).all()
+    
+    # Convert SQLAlchemy objects to dictionaries for JSON serialization
+    return [
+        {
+            "id": u.id,
+            "email": u.email,
+            "is_banned": getattr(u, 'is_banned', 0),
+            "usage_limit": getattr(u, 'usage_limit', -1),
+            "usage_count": getattr(u, 'usage_count', 0),
+        }
+        for u in users
+    ]
 
 
 @app.patch("/admin/users/{user_id}")
 def update_user(user_id: int, is_banned: int = None, usage_limit: int = None, req: Request = None, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] Update user"""
+    """[ADMIN ONLY] Update user settings"""
     require_admin(req)
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -716,7 +757,7 @@ def update_user(user_id: int, is_banned: int = None, usage_limit: int = None, re
 
 @app.post("/admin/tokens/issue", response_model=IssuedTokenResponse)
 def issue_token(body: IssueTokenRequest, req: Request, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] Issue API token"""
+    """[ADMIN ONLY] Issue API token for user"""
     require_admin(req)
     user = db.query(User).filter(User.id == body.user_id).first()
     if not user:
@@ -734,14 +775,14 @@ def issue_token(body: IssueTokenRequest, req: Request, db: Session = Depends(get
 
 @app.get("/admin/tokens", response_model=list[APITokenResponse])
 def list_tokens(req: Request, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] List tokens"""
+    """[ADMIN ONLY] List all API tokens"""
     require_admin(req)
     return db.query(APIToken).all()
 
 
 @app.delete("/admin/tokens/{token_id}")
 def revoke_token(token_id: int, req: Request, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] Revoke token"""
+    """[ADMIN ONLY] Revoke API token"""
     require_admin(req)
     token = db.query(APIToken).filter(APIToken.id == token_id).first()
     if not token:
@@ -763,7 +804,7 @@ async def scan_run(
     right_file: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
-    """Run a scan"""
+    """Run a scan with usage limit checking"""
     
     token = _extract_token(req)
     if not token:
@@ -790,6 +831,7 @@ async def scan_run(
     if not user or getattr(user, 'is_banned', 0):
         raise HTTPException(status_code=403, detail="User banned")
     
+    # Check usage limits
     usage_limit = getattr(user, 'usage_limit', -1)
     usage_count = getattr(user, 'usage_count', 0)
     if usage_limit >= 0 and usage_count >= usage_limit:
@@ -876,7 +918,7 @@ def confirm_diagnosis(
     confirmed_right_diagnosis: str = None,
     db: Session = Depends(get_db),
 ):
-    """Save professional opinion"""
+    """Save professional opinion for diagnosis"""
     
     token = _extract_token(req)
     if not token:
@@ -895,7 +937,6 @@ def confirm_diagnosis(
         raise HTTPException(status_code=404, detail="Scan not found")
     
     try:
-        # Try to set confirmed fields (they might not exist yet in older databases)
         if confirmed_left_diagnosis:
             scan.confirmed_left_diagnosis = confirmed_left_diagnosis
         if confirmed_right_diagnosis:
