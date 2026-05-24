@@ -10,12 +10,15 @@ import torchvision.transforms as T
 from torchvision import models
 from PIL import Image
 
-BUILD_MARKER = "INFERENCE_FINAL_DUALEYE_MATCH_TRAIN_NORMAL_SUPPRESS_2026_01_19"
+BUILD_MARKER = "INFERENCE_DR_FOCUS_2026_01_24"
 
 BASE_DIR = os.path.dirname(__file__)
 MODEL_DIR = os.path.join(BASE_DIR, "model_files")
 
 LABELS_PATH = os.path.join(MODEL_DIR, "labels.json")
+
+# ============ PHASE 1: DIABETIC RETINOPATHY FOCUS ============
+# Later phases can add: GLAUCOMA, CATARACT, AMD, etc.
 
 # labels.json format:
 # [
@@ -27,10 +30,10 @@ with open(LABELS_PATH, "r", encoding="utf-8") as f:
     labels_raw = json.load(f)
 
 if isinstance(labels_raw, list) and len(labels_raw) > 0 and isinstance(labels_raw[0], dict):
-    LABELS: List[str] = [x["code"] for x in labels_raw]
+    ALL_LABELS: List[str] = [x["code"] for x in labels_raw]
     CODE_TO_NAME = {x["code"]: x["name"] for x in labels_raw}
 else:
-    LABELS = list(labels_raw)
+    ALL_LABELS = list(labels_raw)
     CODE_TO_NAME = {
         "N": "normal",
         "D": "diabetic_retinopathy",
@@ -42,11 +45,24 @@ else:
         "O": "other",
     }
 
-NUM_CLASSES = len(LABELS)
+# ============ PHASE 1 CONFIG: Focus on DR vs Normal ============
+ACTIVE_PHASE = int(os.getenv("ACTIVE_PHASE", "1"))  # 1 = DR only, 2+ = multi-disease (future)
+
+if ACTIVE_PHASE == 1:
+    # PHASE 1: Diabetic Retinopathy vs Normal
+    ACTIVE_LABELS = ["N", "D"]  # Only Normal and Diabetic Retinopathy
+    PHASE_NAME = "Diabetic Retinopathy Detection"
+else:
+    # PHASE 2+: Multi-disease (future)
+    # ACTIVE_LABELS = ["N", "D", "G", "C", "A"]  # Uncomment when ready
+    ACTIVE_LABELS = ["N", "D"]  # Default back to Phase 1
+
+LABELS = ACTIVE_LABELS
+NUM_CLASSES = len(ALL_LABELS)  # Model still trained on all classes
 DEFAULT_VARIANT = os.getenv("MODEL_VARIANT", "resnet18").strip().lower()
 DEVICE = "cpu"
 
-# Thresholds (tunable)
+# ============ THRESHOLDS (Tunable per phase) ============
 N_THRESH = float(os.getenv("N_THRESH", "0.70"))                    # Normal strong
 DISEASE_BLOCK_THRESH = float(os.getenv("DISEASE_BLOCK", "0.35"))   # Any disease above this blocks Normal
 DISEASE_MIN_THRESH = float(os.getenv("DISEASE_MIN", "0.50"))       # Disease must be >= this to output disease
@@ -155,6 +171,7 @@ def _probs_from_bytes_single(image_bytes: bytes) -> Dict[str, float]:
     """
     Single-eye inference by duplicating the same image as left and right.
     This matches training format (DualEyeModel expects 2 inputs).
+    Returns ALL class probabilities (model trained on all classes).
     """
     x = _tensor_from_bytes(image_bytes)
 
@@ -162,8 +179,8 @@ def _probs_from_bytes_single(image_bytes: bytes) -> Dict[str, float]:
         probs = MODEL(x, x)[0].detach().cpu().tolist()  # already sigmoid in model
 
     out = {}
-    for i in range(min(len(probs), len(LABELS))):
-        out[LABELS[i]] = float(probs[i])
+    for i in range(min(len(probs), len(ALL_LABELS))):
+        out[ALL_LABELS[i]] = float(probs[i])
     return out
 
 
@@ -178,6 +195,7 @@ def _mirror_bytes(image_bytes: bytes) -> bytes:
 def probs_from_bytes(image_bytes: bytes) -> Dict[str, float]:
     """
     Returns probabilities with optional Mirror TTA.
+    Returns ALL class probabilities (we filter later based on ACTIVE_PHASE).
     """
     p1 = _probs_from_bytes_single(image_bytes)
 
@@ -191,31 +209,59 @@ def probs_from_bytes(image_bytes: bytes) -> Dict[str, float]:
 
 def choose_final_code(probs: Dict[str, float]) -> Tuple[str, str]:
     """
-    Multi-label rule:
-    - Normal only if strong and no disease is significant.
-    - Otherwise take best disease if confident.
+    Multi-label rule - PHASE-AWARE:
+    
+    PHASE 1 (DR focus):
+    - Normal only if strong and DR is low.
+    - Otherwise return DR if confident.
+    - Return "Uncertain" if neither confident.
+    
+    PHASE 2+ (multi-disease):
+    - Can extend to choose best disease among multiple options.
     """
     n_prob = float(probs.get("N", 0.0))
 
-    disease_codes = [c for c in LABELS if c != "N"]
-    if not disease_codes:
-        return "UNCERTAIN", "No disease labels loaded"
+    if ACTIVE_PHASE == 1:
+        # ============ PHASE 1: DR vs Normal ============
+        d_prob = float(probs.get("D", 0.0))
 
-    best_disease = max(disease_codes, key=lambda c: probs.get(c, 0.0))
-    disease_max = float(probs.get(best_disease, 0.0))
+        # Normal allowed only if strong AND DR is low
+        if n_prob >= N_THRESH and d_prob < DISEASE_BLOCK_THRESH:
+            return "N", f"Normal: N={n_prob:.3f} DR={d_prob:.3f}"
 
-    # ✅ Normal allowed only if all diseases low
-    if n_prob >= N_THRESH and disease_max < DISEASE_BLOCK_THRESH:
-        return "N", f"Normal allowed: N={n_prob:.3f} disease_max={disease_max:.3f}"
+        # DR chosen if confident enough
+        if d_prob >= DISEASE_MIN_THRESH:
+            return "D", f"Diabetic Retinopathy: DR={d_prob:.3f} N={n_prob:.3f}"
 
-    # ✅ Disease chosen if high enough
-    if disease_max >= DISEASE_MIN_THRESH:
-        return best_disease, f"Disease chosen: {best_disease}={disease_max:.3f} N={n_prob:.3f}"
+        # Otherwise uncertain
+        return "UNCERTAIN", f"Uncertain: N={n_prob:.3f} DR={d_prob:.3f}"
 
-    return "UNCERTAIN", f"Uncertain: N={n_prob:.3f} disease_max={disease_max:.3f}"
+    else:
+        # ============ PHASE 2+: Multi-disease (future) ============
+        # This section will expand as you add more diseases
+        disease_codes = [c for c in ACTIVE_LABELS if c != "N"]
+        if not disease_codes:
+            return "UNCERTAIN", "No disease labels in active phase"
+
+        best_disease = max(disease_codes, key=lambda c: probs.get(c, 0.0))
+        disease_max = float(probs.get(best_disease, 0.0))
+
+        # Normal allowed only if all diseases low
+        if n_prob >= N_THRESH and disease_max < DISEASE_BLOCK_THRESH:
+            return "N", f"Normal: N={n_prob:.3f} disease_max={disease_max:.3f}"
+
+        # Disease chosen if high enough
+        if disease_max >= DISEASE_MIN_THRESH:
+            return best_disease, f"Disease: {best_disease}={disease_max:.3f} N={n_prob:.3f}"
+
+        return "UNCERTAIN", f"Uncertain: N={n_prob:.3f} disease_max={disease_max:.3f}"
 
 
 def predict_raw(image_bytes: bytes) -> dict:
+    """
+    Core prediction function.
+    Returns all probabilities but filters final output based on ACTIVE_PHASE.
+    """
     probs = probs_from_bytes(image_bytes)
 
     if probs:
@@ -229,23 +275,38 @@ def predict_raw(image_bytes: bytes) -> dict:
     final_code, reason = choose_final_code(probs)
     translated = translate_code(final_code) if final_code != "UNCERTAIN" else "Uncertain"
 
+    # ============ PHASE 1: Return only DR and Normal probabilities ============
+    if ACTIVE_PHASE == 1:
+        active_probs = {k: v for k, v in probs.items() if k in ACTIVE_LABELS}
+    else:
+        active_probs = {k: v for k, v in probs.items() if k in ACTIVE_LABELS}
+
     return {
+        "phase": ACTIVE_PHASE,
+        "phase_name": PHASE_NAME,
         "top_code": top_code,
         "top_prob": top_prob,
         "top3": [(k, float(v)) for k, v in top3],
         "final_code": final_code,
         "final_reason": reason,
         "translated": translated,
-        "probs": probs,  # keep for debugging only
+        "probs": active_probs,  # Filtered by phase
+        "confidence": float(probs.get(final_code, 0.0)) if final_code != "UNCERTAIN" else 0.0,
     }
 
 
 def predict_diagnosis(image_bytes: bytes) -> str:
+    """
+    Simple API: returns diagnosis string only.
+    """
     raw = predict_raw(image_bytes)
     return raw["translated"]
 
 
 def predict_debug(image_bytes: bytes) -> dict:
+    """
+    Full debug output including all metadata.
+    """
     raw = predict_raw(image_bytes)
     return {
         "build_marker": BUILD_MARKER,
@@ -253,7 +314,10 @@ def predict_debug(image_bytes: bytes) -> dict:
         "load_mode": LOAD_MODE,
         "weights_sha": WEIGHTS_SHA,
         "weights_size": WEIGHTS_SIZE,
-        "labels": LABELS,
+        "active_phase": ACTIVE_PHASE,
+        "phase_name": PHASE_NAME,
+        "active_labels": ACTIVE_LABELS,
+        "all_labels": ALL_LABELS,
         "num_classes": NUM_CLASSES,
         "mirror_tta": MIRROR_TTA,
         "thresholds": {

@@ -158,13 +158,18 @@ def get_html_ui():
     .badge{display:inline-block;padding:3px 6px;border-radius:4px;font-size:11px;background:rgba(51,93,255,.3);}
     .badge.confirmed{background:rgba(46,204,113,.3);color:#2ecc71;}
     .badge.pending{background:rgba(255,193,7,.3);color:#ffc107;}
+    .badge.banned{background:rgba(255,107,107,.3);color:#ff6b6b;}
     .flex-between{display:flex;justify-content:space-between;align-items:center;gap:12px;}
     .modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.8);z-index:1000;justify-content:center;align-items:center;}
     .modal.show{display:flex;}
     .modal-content{background:#0b1020;border:2px solid #355dff;border-radius:16px;padding:24px;max-width:600px;width:90%;}
     .row{display:flex;gap:12px;}
     .row>div{flex:1;}
-    @media(max-width:768px){.row{flex-direction:column;}}
+    .user-row{display:flex;gap:12px;align-items:center;padding:12px;background:rgba(0,0,0,.2);border-radius:8px;margin-bottom:12px;}
+    .user-row>div{flex:1;}
+    .user-controls{display:flex;gap:8px;}
+    .user-controls input,.user-controls select{width:auto;flex:1;max-width:120px;}
+    @media(max-width:768px){.row{flex-direction:column;}.user-row{flex-direction:column;}}
   </style>
 </head>
 <body>
@@ -235,640 +240,464 @@ def get_html_ui():
       </div>
     </div>
 
-    <!-- USERS SECTION -->
+    <!-- USERS SECTION - FIXED WITH MANAGEMENT CONTROLS -->
     <div id="usersSection" style="display:none;margin-top:20px;">
-      <h3>👥 Doctors</h3>
-      <button onclick="loadUsers()" style="margin-bottom:12px;">Refresh</button>
-      <table class="table">
-        <thead>
-          <tr><th>Email</th><th>Scans</th><th>Opinions</th></tr>
-        </thead>
-        <tbody id="usersList"></tbody>
-      </table>
+      <h3>👥 User Management</h3>
+      <div style="margin-bottom:16px;">
+        <button onclick="loadUsers()" class="success">🔄 Refresh Users</button>
+      </div>
+      <div id="usersList"></div>
     </div>
 
     <!-- TOKENS SECTION -->
     <div id="tokensSection" style="display:none;margin-top:20px;">
       <h3>🔑 API Tokens</h3>
-      <div style="padding:12px;background:rgba(51,93,255,.1);border-radius:8px;margin-bottom:12px;">
-        <label>User ID</label>
-        <input id="tokenUserId" type="number" placeholder="2"/>
-        <label>Token Name</label>
-        <input id="tokenName" placeholder="Mobile App"/>
-        <button onclick="issueToken()" style="margin-top:8px;">Generate</button>
-        <p id="tokenStatus" class="muted" style="margin-top:8px;"></p>
-        <div id="tokenDisplay" style="display:none;margin-top:12px;padding:12px;background:rgba(0,0,0,.3);border-radius:8px;">
-          <textarea id="tokenValue" readonly style="height:60px;font-family:monospace;font-size:12px;"></textarea>
-          <button onclick="copyToken()" style="margin-top:8px;">Copy</button>
+      <div style="margin:12px 0;">
+        <h4>Issue New Token</h4>
+        <div class="row">
+          <div>
+            <label>User ID</label>
+            <input id="tokenUserId" type="number" placeholder="User ID"/>
+          </div>
+          <div>
+            <label>Token Name</label>
+            <input id="tokenName" placeholder="e.g., Production API"/>
+          </div>
         </div>
+        <button onclick="issueToken()" style="margin-top:12px;">Issue Token</button>
       </div>
-      <h4>Active Tokens</h4>
+      <h4 style="margin-top:20px;">Active Tokens</h4>
       <table class="table">
         <thead>
-          <tr><th>ID</th><th>User</th><th>Name</th><th>Action</th></tr>
+          <tr><th>Token ID</th><th>User ID</th><th>Created</th><th>Status</th><th>Action</th></tr>
         </thead>
         <tbody id="tokensList"></tbody>
       </table>
     </div>
   </div>
 
-  <!-- SCAN CARD (DOCTORS & OWNER TESTING) -->
-  <div class="card" id="scanCard" style="display:none;">
-    <div class="flex-between">
-      <h3 style="margin:0;">Patient Eye Scan</h3>
-      <div>
-        <button id="backBtn" onclick="backToAdmin()" class="secondary" style="display:none;margin-right:8px;">← Back to Admin</button>
-        <button onclick="doLogout()" class="secondary">Logout</button>
+  <!-- DOCTOR INTERFACE -->
+  <div class="card" id="doctorCard" style="display:none;">
+    <h2>🏥 Scan & Diagnose</h2>
+    <div style="margin:20px 0;">
+      <label>Select Eye(s)</label>
+      <select id="eyeMode">
+        <option value="left">Left Eye Only</option>
+        <option value="right">Right Eye Only</option>
+        <option value="both">Both Eyes</option>
+      </select>
+    </div>
+
+    <div id="singleEyeUpload" style="display:block;">
+      <label>Upload Image</label>
+      <input id="imageFile" type="file" accept="image/*"/>
+    </div>
+
+    <div id="bothEyesUpload" style="display:none;">
+      <label>Left Eye Image</label>
+      <input id="leftFile" type="file" accept="image/*"/>
+      <label style="margin-top:12px;">Right Eye Image</label>
+      <input id="rightFile" type="file" accept="image/*"/>
+    </div>
+
+    <button onclick="runScan()" style="margin-top:16px;width:100%;">Analyze</button>
+
+    <div id="scanResult" style="display:none;margin-top:24px;">
+      <h3>Result</h3>
+      <div class="result">
+        <div style="margin-bottom:12px;">
+          <span class="big" id="diagnosisText"></span>
+        </div>
+        <p id="confidenceText" class="muted"></p>
+        
+        <h4 style="margin-top:16px;">Professional Opinion</h4>
+        <p class="muted">Confirm or correct the AI diagnosis:</p>
+        <div id="confirmationUI"></div>
+        <button onclick="submitConfirmation()" style="margin-top:12px;width:100%;">Save Opinion</button>
       </div>
     </div>
-
-    <label>Eye</label>
-    <select id="eyeMode">
-      <option value="left">Left</option>
-      <option value="right">Right</option>
-      <option value="both">Both</option>
-    </select>
-
-    <label>Image</label>
-    <input id="singleFile" type="file" accept="image/*"/>
-
-    <div style="height:10px"></div>
-    <button onclick="runScan()">Analyze</button>
-    <p id="scanStatus" class="muted"></p>
-
-    <!-- AI RESULT -->
-    <div class="result" id="resultBox" style="display:none;">
-      <div class="big">🤖 AI Analysis Result</div>
-      <div id="diagText" style="margin-top:12px;font-size:16px;line-height:1.6;"></div>
-      <div style="height:16px"></div>
-      <button class="success" onclick="openOpinionModal()">💬 Add Professional Opinion</button>
-      <p id="opinionStatus" class="muted" style="margin-top:8px;"></p>
-    </div>
   </div>
-
-  <!-- PROFESSIONAL OPINION MODAL -->
-  <div id="opinionModal" class="modal">
-    <div class="modal-content">
-      <h3>Professional Opinion</h3>
-      <p class="muted">Enter your professional diagnosis for this patient</p>
-      
-      <div id="opinionFields" style="margin:16px 0;"></div>
-      
-      <div style="height:12px"></div>
-      <button class="success" onclick="saveProfessionalOpinion()">Save Opinion</button>
-      <button class="secondary" onclick="closeOpinionModal()">Cancel</button>
-    </div>
-  </div>
-
 </div>
 
 <script>
-let TOKEN = null;
-let IS_OWNER = false;
-let OWNER_EMAIL = "";
-let OWNER_PASSWORD = "";
-let USER_ID = null;
-let CURRENT_SCAN_ID = null;
-let CURRENT_EYE_MODE = null;
+let currentToken = localStorage.getItem("token");
+let currentUserId = localStorage.getItem("userId");
+let currentScanId = null;
 
-function setStatus(id, msg, ok=null){
-  const el = document.getElementById(id);
-  if(!el) return;
-  el.textContent = msg;
-  if(ok===true) el.className="muted ok";
-  else if(ok===false) el.className="muted bad";
-  else el.className="muted";
+function showSection(section) {
+  document.getElementById('resultsSection').style.display = section === 'results' ? 'block' : 'none';
+  document.getElementById('usersSection').style.display = section === 'users' ? 'block' : 'none';
+  document.getElementById('tokensSection').style.display = section === 'tokens' ? 'block' : 'none';
+  if (section === 'users') loadUsers();
+  if (section === 'tokens') loadTokens();
 }
 
-function showSection(sec){
-  document.getElementById("resultsSection").style.display = sec==="results" ? "block" : "none";
-  document.getElementById("usersSection").style.display = sec==="users" ? "block" : "none";
-  document.getElementById("tokensSection").style.display = sec==="tokens" ? "block" : "none";
-  if(sec==="results") loadResults();
-  if(sec==="users") loadUsers();
-  if(sec==="tokens") loadTokens();
+function showLogin() {
+  document.getElementById('loginTab').style.display = 'block';
+  document.getElementById('registerTab').style.display = 'none';
 }
 
-function switchToTest(){
-  document.getElementById("adminCard").style.display = "none";
-  document.getElementById("scanCard").style.display = "block";
-  document.getElementById("backBtn").style.display = "block";
+function showRegister() {
+  document.getElementById('loginTab').style.display = 'none';
+  document.getElementById('registerTab').style.display = 'block';
 }
 
-function backToAdmin(){
-  document.getElementById("scanCard").style.display = "none";
-  document.getElementById("adminCard").style.display = "block";
-  document.getElementById("backBtn").style.display = "none";
-}
-
-function showLogin(){
-  document.getElementById("loginTab").style.display="block";
-  document.getElementById("registerTab").style.display="none";
-}
-
-function showRegister(){
-  document.getElementById("loginTab").style.display="none";
-  document.getElementById("registerTab").style.display="block";
-}
-
-async function doRegister(){
-  setStatus("authStatus","Registering…");
-  const email = document.getElementById("regEmail").value.trim();
-  const password = document.getElementById("regPassword").value;
-  if(!password){
-    setStatus("authStatus","Password required",false);
-    return;
-  }
-  try{
-    const r = await fetch("/auth/register",{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
+async function doLogin() {
+  const email = document.getElementById('email').value;
+  const password = document.getElementById('password').value;
+  try {
+    const res = await fetch('/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({email, password})
     });
-    const data = await r.json();
-    if(!r.ok) throw new Error(data.detail || "Failed");
-    setStatus("authStatus","Success! Login now. ✅",true);
-    setTimeout(() => showLogin(), 1000);
-  }catch(e){
-    setStatus("authStatus","Error: "+e.message,false);
-  }
-}
-
-async function doLogin(){
-  setStatus("authStatus","Logging in…");
-  const email = document.getElementById("email").value.trim();
-  const password = document.getElementById("password").value;
-  try{
-    const r = await fetch("/auth/login",{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({email,password})
-    });
-    const data = await r.json();
-    if(!r.ok) throw new Error(data.detail || "Failed");
-    TOKEN = data.access_token;
-    IS_OWNER = data.is_owner || false;
-    USER_ID = data.user_id;
-    setStatus("authStatus","Success! ✅",true);
-    document.getElementById("authCard").style.display="none";
-    if(IS_OWNER){
-      OWNER_EMAIL = email;
-      OWNER_PASSWORD = password;
-      document.getElementById("adminCard").style.display="block";
-      showSection("results");
+    const data = await res.json();
+    if (data.access_token) {
+      currentToken = data.access_token;
+      currentUserId = data.user_id;
+      localStorage.setItem('token', currentToken);
+      localStorage.setItem('userId', currentUserId);
+      document.getElementById('authCard').style.display = 'none';
+      document.getElementById('adminCard').style.display = data.is_admin ? 'block' : 'none';
+      document.getElementById('doctorCard').style.display = data.is_admin ? 'none' : 'block';
     } else {
-      document.getElementById("scanCard").style.display="block";
+      document.getElementById('authStatus').textContent = '❌ Login failed';
     }
-  }catch(e){
-    TOKEN = null;
-    setStatus("authStatus","Failed: "+e.message,false);
+  } catch(e) {
+    document.getElementById('authStatus').textContent = '❌ Error: ' + e.message;
   }
 }
 
-function doLogout(){
-  TOKEN = null;
-  IS_OWNER = false;
-  document.getElementById("authCard").style.display="block";
-  document.getElementById("adminCard").style.display="none";
-  document.getElementById("scanCard").style.display="none";
-  document.getElementById("loginTab").style.display="block";
-  document.getElementById("email").value = "";
-  document.getElementById("password").value = "";
-}
-
-async function loadResults(){
-  const authHeader = "Bearer " + OWNER_EMAIL + ":" + OWNER_PASSWORD;
-  try{
-    const r = await fetch("/admin/results/all", {
-      headers: {"Authorization": authHeader}
+async function doRegister() {
+  const email = document.getElementById('regEmail').value;
+  const password = document.getElementById('regPassword').value;
+  try {
+    const res = await fetch('/auth/register', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email, password})
     });
-    const data = await r.json();
-    displayResults(data);
-  }catch(e){
-    console.error(e);
+    const data = await res.json();
+    if (data.access_token) {
+      currentToken = data.access_token;
+      currentUserId = data.user_id;
+      localStorage.setItem('token', currentToken);
+      localStorage.setItem('userId', currentUserId);
+      document.getElementById('authCard').style.display = 'none';
+      document.getElementById('doctorCard').style.display = 'block';
+    } else {
+      document.getElementById('authStatus').textContent = '❌ Registration failed';
+    }
+  } catch(e) {
+    document.getElementById('authStatus').textContent = '❌ Error: ' + e.message;
   }
 }
 
-function displayResults(data){
-  const tbody = document.getElementById("resultsList");
-  tbody.innerHTML = "";
-  
-  if(!data.results || data.results.length === 0){
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;opacity:.5;">No results yet</td></tr>';
-    return;
-  }
-  
-  data.results.forEach(r => {
-    const match = r.ai_diagnosis === r.professional_opinion ? "✅" : "❌";
-    const row = document.createElement("tr");
-    row.innerHTML = `
-      <td>${r.scan_id}</td>
-      <td>${r.doctor_email}</td>
-      <td>${r.ai_diagnosis || "-"}</td>
-      <td>${r.professional_opinion || "-"}</td>
-      <td>${match}</td>
-      <td>${new Date(r.confirmed_at).toLocaleDateString()}</td>
-    `;
-    tbody.appendChild(row);
-  });
-  
-  if(data.analytics){
-    document.getElementById("analyticsBox").style.display="block";
-    displayAnalytics(data.analytics);
-  }
+function doLogout() {
+  currentToken = null;
+  currentUserId = null;
+  localStorage.removeItem('token');
+  localStorage.removeItem('userId');
+  document.getElementById('authCard').style.display = 'block';
+  document.getElementById('adminCard').style.display = 'none';
+  document.getElementById('doctorCard').style.display = 'none';
+  document.getElementById('email').value = '';
+  document.getElementById('password').value = '';
 }
 
-function displayAnalytics(analytics){
-  let html = "<table class='table'><tr><th>Diagnosis</th><th>Sensitivity</th><th>Specificity</th><th>Count</th></tr>";
-  for(const [diag, stats] of Object.entries(analytics)){
-    html += `<tr>
-      <td>${diag}</td>
-      <td>${(stats.sensitivity*100).toFixed(1)}%</td>
-      <td>${(stats.specificity*100).toFixed(1)}%</td>
-      <td>${stats.count}</td>
-    </tr>`;
-  }
-  html += "</table>";
-  document.getElementById("analyticsContent").innerHTML = html;
-}
-
-async function exportResults(){
-  const authHeader = "Bearer " + OWNER_EMAIL + ":" + OWNER_PASSWORD;
-  try{
-    const r = await fetch("/admin/results/export", {
-      headers: {"Authorization": authHeader}
+async function loadUsers() {
+  try {
+    const res = await fetch('/admin/users', {
+      headers: {'Authorization': `Bearer ${currentToken}`}
     });
-    const data = await r.json();
-    const blob = new Blob([JSON.stringify(data, null, 2)], {type: "application/json"});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "alati_results_" + new Date().toISOString().slice(0,10) + ".json";
-    a.click();
-  }catch(e){
-    alert("Export failed: "+e.message);
-  }
-}
-
-async function loadUsers(){
-  const authHeader = "Bearer " + OWNER_EMAIL + ":" + OWNER_PASSWORD;
-  try{
-    const r = await fetch("/admin/users", {
-      headers: {"Authorization": authHeader}
-    });
-    const users = await r.json();
-    const tbody = document.getElementById("usersList");
-    tbody.innerHTML = "";
-    users.forEach(u => {
-      const row = document.createElement("tr");
-      row.innerHTML = `<td>${u.email}</td><td>${u.usage_count || 0}</td><td id="op-${u.id}">-</td>`;
-      tbody.appendChild(row);
-      fetch("/admin/user/" + u.id + "/opinions?count=true", {
-        headers: {"Authorization": authHeader}
-      }).then(r => r.json()).then(d => {
-        document.getElementById("op-"+u.id).textContent = d.count || 0;
-      }).catch(e => {});
-    });
-  }catch(e){
-    console.error(e);
-  }
-}
-
-async function loadTokens(){
-  const authHeader = "Bearer " + OWNER_EMAIL + ":" + OWNER_PASSWORD;
-  try{
-    const r = await fetch("/admin/tokens", {
-      headers: {"Authorization": authHeader}
-    });
-    const tokens = await r.json();
-    const tbody = document.getElementById("tokensList");
-    tbody.innerHTML = "";
-    tokens.forEach(t => {
-      const row = document.createElement("tr");
-      row.innerHTML = `
-        <td>${t.id}</td><td>${t.user_id}</td><td>${t.name || "-"}</td>
-        <td>${t.is_active ? '<button class="danger" onclick="revokeToken('+t.id+')">Revoke</button>' : "-"}</td>
+    const users = await res.json();
+    let html = '';
+    for (const user of users) {
+      const isAdmin = user.id === parseInt(currentUserId);
+      const isBanned = user.is_banned ? true : false;
+      const usageLimit = user.usage_limit || -1;
+      const usageCount = user.usage_count || 0;
+      
+      html += `
+        <div class="user-row">
+          <div style="flex:2;">
+            <strong>${user.email}</strong><br>
+            <span class="muted">ID: ${user.id}</span>
+          </div>
+          <div style="flex:1;">
+            <span class="muted">Scans: ${usageCount}/${usageLimit === -1 ? '∞' : usageLimit}</span>
+          </div>
+          <div class="user-controls">
+            <input type="number" id="limit_${user.id}" value="${usageLimit === -1 ? '' : usageLimit}" placeholder="Limit" min="-1"/>
+            <select id="ban_${user.id}">
+              <option value="0" ${!isBanned ? 'selected' : ''}>Active</option>
+              <option value="1" ${isBanned ? 'selected' : ''}>Banned</option>
+            </select>
+            ${isAdmin ? '<span class="badge">Owner</span>' : `<button onclick="updateUser(${user.id})" class="success" style="width:auto;">Update</button>`}
+          </div>
+        </div>
       `;
-      tbody.appendChild(row);
-    });
-  }catch(e){
-    console.error(e);
-  }
-}
-
-async function issueToken(){
-  const uid = document.getElementById("tokenUserId").value;
-  const name = document.getElementById("tokenName").value;
-  if(!uid){
-    setStatus("tokenStatus","Enter user ID",false);
-    return;
-  }
-  const authHeader = "Bearer " + OWNER_EMAIL + ":" + OWNER_PASSWORD;
-  try{
-    const r = await fetch("/admin/tokens/issue", {
-      method: "POST",
-      headers: {"Authorization": authHeader, "Content-Type": "application/json"},
-      body: JSON.stringify({user_id: parseInt(uid), name: name || null})
-    });
-    const data = await r.json();
-    if(!r.ok) throw new Error(data.detail);
-    document.getElementById("tokenValue").value = data.token;
-    document.getElementById("tokenDisplay").style.display = "block";
-    setStatus("tokenStatus","Created! ✅",true);
-  }catch(e){
-    setStatus("tokenStatus","Error: "+e.message,false);
-  }
-}
-
-function copyToken(){
-  document.getElementById("tokenValue").select();
-  document.execCommand("copy");
-  alert("Copied!");
-}
-
-async function revokeToken(id){
-  if(!confirm("Revoke?")) return;
-  const authHeader = "Bearer " + OWNER_EMAIL + ":" + OWNER_PASSWORD;
-  try{
-    const r = await fetch("/admin/tokens/" + id, {
-      method: "DELETE",
-      headers: {"Authorization": authHeader}
-    });
-    if(!r.ok) throw new Error("Failed");
-    alert("Revoked!");
-    loadTokens();
-  }catch(e){
-    alert("Error: "+e.message);
-  }
-}
-
-async function runScan(){
-  if(!TOKEN){
-    setStatus("scanStatus","Login first",false);
-    return;
-  }
-  const mode = document.getElementById("eyeMode").value;
-  const file = document.getElementById("singleFile").files?.[0];
-  if(!file){
-    setStatus("scanStatus","Select image",false);
-    return;
-  }
-  const fd = new FormData();
-  fd.append("eye_mode", mode);
-  fd.append("file", file);
-  setStatus("scanStatus","Analyzing…");
-  document.getElementById("resultBox").style.display="none";
-  try{
-    const r = await fetch("/scan/run",{
-      method:"POST",
-      headers:{"Authorization":"Bearer "+TOKEN},
-      body: fd
-    });
-    const data = await r.json();
-    if(!r.ok) throw new Error(data.detail);
-    if(data.status !== "done"){
-      setStatus("scanStatus","Failed",false);
-    }else{
-      setStatus("scanStatus","Done ✅",true);
-      CURRENT_SCAN_ID = data.id;
-      CURRENT_EYE_MODE = mode;
-      let txt = mode==="left" ? data.left_diagnosis : mode==="right" ? data.right_diagnosis : (data.left_diagnosis || "-") + " (L) / " + (data.right_diagnosis || "-") + " (R)";
-      document.getElementById("diagText").textContent = txt || "No diagnosis";
     }
-    document.getElementById("resultBox").style.display="block";
-  }catch(e){
-    setStatus("scanStatus","Error: "+e.message,false);
+    document.getElementById('usersList').innerHTML = html || '<p class="muted">No users found</p>';
+  } catch(e) {
+    document.getElementById('usersList').innerHTML = '<p class="bad">Error loading users: ' + e.message + '</p>';
   }
 }
 
-function openOpinionModal(){
-  if(!CURRENT_SCAN_ID){
-    alert("No scan");
-    return;
-  }
-  let html = "";
-  if(CURRENT_EYE_MODE === "left" || CURRENT_EYE_MODE === "both"){
-    html += `<div><label>Left Eye Diagnosis</label><input id="opLeft" type="text" placeholder="e.g., Healthy, Diabetic Retinopathy"/></div>`;
-  }
-  if(CURRENT_EYE_MODE === "right" || CURRENT_EYE_MODE === "both"){
-    html += `<div><label>Right Eye Diagnosis</label><input id="opRight" type="text" placeholder="e.g., Healthy, Cataract"/></div>`;
-  }
-  document.getElementById("opinionFields").innerHTML = html;
-  document.getElementById("opinionModal").classList.add("show");
-}
-
-function closeOpinionModal(){
-  document.getElementById("opinionModal").classList.remove("show");
-}
-
-async function saveProfessionalOpinion(){
-  if(!CURRENT_SCAN_ID){
-    alert("No scan");
-    return;
-  }
-  const body = {
-    scan_id: CURRENT_SCAN_ID,
-    confirmed_left_diagnosis: document.getElementById("opLeft")?.value || null,
-    confirmed_right_diagnosis: document.getElementById("opRight")?.value || null,
-  };
-  try{
-    const r = await fetch("/scan/confirm", {
-      method: "POST",
-      headers: {"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"},
-      body: JSON.stringify(body)
+async function updateUser(userId) {
+  const limitInput = document.getElementById(`limit_${userId}`);
+  const banSelect = document.getElementById(`ban_${userId}`);
+  
+  const usage_limit = limitInput.value === '' ? -1 : parseInt(limitInput.value);
+  const is_banned = parseInt(banSelect.value);
+  
+  try {
+    const res = await fetch(`/admin/users/${userId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${currentToken}`
+      },
+      body: JSON.stringify({usage_limit, is_banned})
     });
-    const data = await r.json();
-    if(!r.ok) throw new Error(data.detail);
-    setStatus("opinionStatus", "✅ Saved!", true);
-    closeOpinionModal();
-    setTimeout(() => {
-      document.getElementById("resultBox").style.display = "none";
-      document.getElementById("singleFile").value = "";
-      setStatus("opinionStatus", "");
-    }, 1500);
-  }catch(e){
-    alert("Error: "+e.message);
+    const data = await res.json();
+    if (data.status === 'updated') {
+      alert('✓ User updated successfully');
+      loadUsers();
+    } else {
+      alert('❌ Failed to update user');
+    }
+  } catch(e) {
+    alert('Error: ' + e.message);
   }
+}
+
+async function loadTokens() {
+  try {
+    const res = await fetch('/admin/tokens', {
+      headers: {'Authorization': `Bearer ${currentToken}`}
+    });
+    const tokens = await res.json();
+    let html = '';
+    for (const token of tokens) {
+      html += `<tr>
+        <td>${token.id}</td>
+        <td>${token.user_id}</td>
+        <td>${new Date(token.created_at).toLocaleDateString()}</td>
+        <td><span class="badge ${token.is_active ? 'confirmed' : 'pending'}">${token.is_active ? 'Active' : 'Inactive'}</span></td>
+        <td><button onclick="revokeToken(${token.id})" class="danger" style="width:auto;">Revoke</button></td>
+      </tr>`;
+    }
+    document.getElementById('tokensList').innerHTML = html || '<tr><td colspan="5" class="muted">No tokens</td></tr>';
+  } catch(e) {
+    alert('Error loading tokens: ' + e.message);
+  }
+}
+
+async function issueToken() {
+  const userId = parseInt(document.getElementById('tokenUserId').value);
+  const name = document.getElementById('tokenName').value;
+  if (!userId || !name) {
+    alert('Please fill all fields');
+    return;
+  }
+  try {
+    const res = await fetch('/admin/tokens/issue', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${currentToken}`
+      },
+      body: JSON.stringify({user_id: userId, name})
+    });
+    const data = await res.json();
+    alert(`✓ Token issued:\n\n${data.token}`);
+    document.getElementById('tokenUserId').value = '';
+    document.getElementById('tokenName').value = '';
+    loadTokens();
+  } catch(e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+async function revokeToken(tokenId) {
+  if (!confirm('Revoke this token?')) return;
+  try {
+    await fetch(`/admin/tokens/${tokenId}`, {
+      method: 'DELETE',
+      headers: {'Authorization': `Bearer ${currentToken}`}
+    });
+    alert('✓ Token revoked');
+    loadTokens();
+  } catch(e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+async function runScan() {
+  const eyeMode = document.getElementById('eyeMode').value;
+  const formData = new FormData();
+  formData.append('eye_mode', eyeMode);
+  
+  if (eyeMode === 'both') {
+    const leftFile = document.getElementById('leftFile').files[0];
+    const rightFile = document.getElementById('rightFile').files[0];
+    if (!leftFile || !rightFile) {
+      alert('Please select both images');
+      return;
+    }
+    formData.append('left_file', leftFile);
+    formData.append('right_file', rightFile);
+  } else {
+    const imageFile = document.getElementById('imageFile').files[0];
+    if (!imageFile) {
+      alert('Please select an image');
+      return;
+    }
+    formData.append('file', imageFile);
+  }
+  
+  try {
+    const res = await fetch('/scan/run', {
+      method: 'POST',
+      headers: {'Authorization': `Bearer ${currentToken}`},
+      body: formData
+    });
+    const data = await res.json();
+    currentScanId = data.id;
+    
+    const diagnosis = eyeMode === 'both' 
+      ? `Left: ${data.left_diagnosis} | Right: ${data.right_diagnosis}`
+      : data.left_diagnosis || data.right_diagnosis;
+    
+    document.getElementById('diagnosisText').textContent = diagnosis;
+    document.getElementById('confidenceText').textContent = 'AI Suggestion - Please verify';
+    
+    let confirmUI = '';
+    if (eyeMode === 'both') {
+      confirmUI = `
+        <label>Left Eye Opinion</label>
+        <input id="confirmLeft" value="${data.left_diagnosis}"/>
+        <label style="margin-top:12px;">Right Eye Opinion</label>
+        <input id="confirmRight" value="${data.right_diagnosis}"/>
+      `;
+    } else {
+      confirmUI = `
+        <label>Your Opinion</label>
+        <input id="confirmDiag" value="${diagnosis}"/>
+      `;
+    }
+    document.getElementById('confirmationUI').innerHTML = confirmUI;
+    document.getElementById('scanResult').style.display = 'block';
+  } catch(e) {
+    alert('Scan failed: ' + e.message);
+  }
+}
+
+async function submitConfirmation() {
+  const eyeMode = document.getElementById('eyeMode').value;
+  let leftDiag = null, rightDiag = null;
+  
+  if (eyeMode === 'both') {
+    leftDiag = document.getElementById('confirmLeft').value;
+    rightDiag = document.getElementById('confirmRight').value;
+  } else if (eyeMode === 'left') {
+    leftDiag = document.getElementById('confirmDiag').value;
+  } else {
+    rightDiag = document.getElementById('confirmDiag').value;
+  }
+  
+  try {
+    const res = await fetch('/scan/confirm', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${currentToken}`
+      },
+      body: JSON.stringify({
+        scan_id: currentScanId,
+        confirmed_left_diagnosis: leftDiag,
+        confirmed_right_diagnosis: rightDiag
+      })
+    });
+    const data = await res.json();
+    alert('✓ Opinion saved');
+  } catch(e) {
+    alert('Error saving: ' + e.message);
+  }
+}
+
+function switchToTest() {
+  document.getElementById('adminCard').style.display = 'none';
+  document.getElementById('doctorCard').style.display = 'block';
+}
+
+document.getElementById('eyeMode').addEventListener('change', function() {
+  document.getElementById('singleEyeUpload').style.display = this.value === 'both' ? 'none' : 'block';
+  document.getElementById('bothEyesUpload').style.display = this.value === 'both' ? 'block' : 'none';
+});
+
+if (currentToken) {
+  document.getElementById('authCard').style.display = 'none';
+  document.getElementById('adminCard').style.display = 'block';
 }
 </script>
 </body>
 </html>
-"""
+    """
 
 
 # ============ AUTH ENDPOINTS ============
 
-@app.post("/auth/register")
+@app.post("/auth/register", response_model=TokenResponse)
 def register(body: RegisterRequest, db: Session = Depends(get_db)):
     """Register a new user"""
     email = (body.email or "").strip().lower()
-    if not email or "@" not in email:
+    if not email or len(email) < 3:
         raise HTTPException(status_code=400, detail="Invalid email")
     
     existing = db.query(User).filter(User.email == email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    password = (body.password or "").strip()
-    if not password:
-        raise HTTPException(status_code=400, detail="Password required")
+    password = (body.password or "").strip()[:72]
+    if not password or len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password too short")
     
-    password = password[:72]
     user = User(email=email, password_hash=hash_password(password))
     db.add(user)
     db.commit()
     db.refresh(user)
     
-    return {"access_token": create_token(user.id)}
+    token = create_token({"sub": str(user.id)})
+    return TokenResponse(access_token=token, user_id=user.id, is_admin=False)
 
 
-@app.post("/auth/login")
+@app.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
-    """Login with email and password"""
+    """Login user"""
     email = (body.email or "").strip().lower()
     user = db.query(User).filter(User.email == email).first()
     
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    is_banned = getattr(user, 'is_banned', 0)
-    if is_banned:
-        raise HTTPException(status_code=403, detail="User account is banned")
-    
-    usage_limit = getattr(user, 'usage_limit', -1)
-    usage_count = getattr(user, 'usage_count', 0)
-    
-    owner_email = (settings.OWNER_EMAIL or "").strip().lower()
-    is_owner = (email == owner_email)
-    
-    return {
-        "access_token": create_token(user.id),
-        "is_owner": is_owner,
-        "user_id": user.id,
-        "email": user.email,
-        "usage_limit": usage_limit,
-        "usage_count": usage_count,
-    }
+    is_admin = email == (settings.OWNER_EMAIL or "").strip().lower()
+    token = create_token({"sub": str(user.id)})
+    return TokenResponse(access_token=token, user_id=user.id, is_admin=is_admin)
 
 
-# ============ ADMIN ENDPOINTS ============
+# ============ USER ENDPOINTS ============
 
 @app.get("/admin/users")
 def list_users(req: Request, db: Session = Depends(get_db)):
     """[ADMIN ONLY] List all users"""
     require_admin(req)
-    users = db.query(User).all()
-    return [
-        {
-            "id": u.id,
-            "email": u.email,
-            "usage_count": getattr(u, 'usage_count', 0),
-        }
-        for u in users
-    ]
+    return db.query(User).all()
 
 
-@app.get("/admin/user/{user_id}/opinions")
-def get_user_opinions(user_id: int, count: bool = False, req: Request = None, db: Session = Depends(get_db)):
-    """Get opinions for a user"""
-    scans = db.query(Scan).filter(
-        Scan.user_id == user_id,
-        Scan.confirmed_at != None
-    ).all()
-    
-    if count:
-        return {"count": len(scans)}
-    
-    return scans
-
-
-@app.get("/admin/results/all")
-def get_all_results(req: Request, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] Get all results with analytics"""
-    require_admin(req)
-    
-    # Get all scans
-    all_scans = db.query(Scan).all()
-    users_map = {u.id: u.email for u in db.query(User).all()}
-    
-    results = []
-    by_diagnosis = {}
-    
-    for scan in all_scans:
-        # Use getattr to safely access confirmed columns that might not exist
-        confirmed_at = getattr(scan, 'confirmed_at', None)
-        confirmed_left = getattr(scan, 'confirmed_left_diagnosis', None)
-        confirmed_right = getattr(scan, 'confirmed_right_diagnosis', None)
-        
-        # Only process if confirmed
-        if not confirmed_at:
-            continue
-        
-        diagnoses = []
-        if scan.eye_mode == "both":
-            diagnoses = [
-                (scan.left_diagnosis, confirmed_left),
-                (scan.right_diagnosis, confirmed_right),
-            ]
-        elif scan.eye_mode == "left":
-            diagnoses = [(scan.left_diagnosis, confirmed_left)]
-        else:
-            diagnoses = [(scan.right_diagnosis, confirmed_right)]
-        
-        for ai_diag, confirmed_diag in diagnoses:
-            if not confirmed_diag:
-                continue
-            
-            results.append({
-                "scan_id": scan.id,
-                "doctor_email": users_map.get(scan.user_id, "Unknown"),
-                "ai_diagnosis": ai_diag,
-                "professional_opinion": confirmed_diag,
-                "confirmed_at": confirmed_at,
-            })
-            
-            key = confirmed_diag
-            if key not in by_diagnosis:
-                by_diagnosis[key] = {"tp": 0, "fp": 0, "count": 0}
-            
-            by_diagnosis[key]["count"] += 1
-            if ai_diag == confirmed_diag:
-                by_diagnosis[key]["tp"] += 1
-            else:
-                by_diagnosis[key]["fp"] += 1
-    
-    # Calculate metrics
-    analytics = {}
-    for diag, stats in by_diagnosis.items():
-        tp = stats["tp"]
-        fp = stats["fp"]
-        total = tp + fp
-        
-        analytics[diag] = {
-            "sensitivity": tp / total if total > 0 else 0,
-            "specificity": 0.5,  # Placeholder - would need more data
-            "count": total,
-            "correct": tp,
-            "incorrect": fp,
-        }
-    
-    return {
-        "results": results,
-        "total": len(results),
-        "confirmed_scans": len(scans),
-        "analytics": analytics,
-    }
-
-
-@app.get("/admin/results/export")
-def export_results(req: Request, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] Export results as JSON"""
-    require_admin(req)
-    return get_all_results(req, db)
-
-
-@app.put("/admin/users/{user_id}")
-def update_user(user_id: int, req: Request, db: Session = Depends(get_db), is_banned: int = None, usage_limit: int = None):
+@app.patch("/admin/users/{user_id}")
+def update_user(user_id: int, is_banned: int = None, usage_limit: int = None, req: Request = None, db: Session = Depends(get_db)):
     """[ADMIN ONLY] Update user"""
     require_admin(req)
     user = db.query(User).filter(User.id == user_id).first()
