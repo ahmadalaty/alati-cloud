@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alati - Results & Analytics</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto; background: #fafaf8; color: #2c2c2a; }
+    
+    .container { max-width: 900px; margin: 0 auto; padding: 2rem; }
+    
+    .header { margin-bottom: 2rem; }
+    .header h1 { font-size: 24px; font-weight: 500; margin: 0; }
+    .header p { font-size: 13px; color: #888780; margin: 4px 0 0; }
+    
+    .controls { display: flex; gap: 12px; margin-bottom: 1.5rem; flex-wrap: wrap; }
+    .controls input { flex: 1; min-width: 200px; padding: 10px 12px; border: 0.5px solid #d3d1c7; border-radius: 6px; font-size: 13px; background: white; }
+    .controls select { padding: 10px 12px; border: 0.5px solid #d3d1c7; border-radius: 6px; font-size: 13px; background: white; cursor: pointer; }
+    .export-btn { padding: 10px 14px; background: #0f6e56; color: white; border: none; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; }
+    
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 2rem; }
+    .stat-card { background: white; border: 0.5px solid #d3d1c7; border-radius: 8px; padding: 1.25rem; }
+    .stat-label { font-size: 12px; color: #888780; margin: 0 0 8px; text-transform: uppercase; font-weight: 500; }
+    .stat-value { font-size: 26px; font-weight: 500; margin: 0; }
+    
+    .results-table { background: white; border: 0.5px solid #d3d1c7; border-radius: 8px; overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead { background: #f1efe8; border-bottom: 0.5px solid #d3d1c7; }
+    th { text-align: left; padding: 12px 16px; font-weight: 500; color: #444441; }
+    td { padding: 12px 16px; border-bottom: 0.5px solid #d3d1c7; }
+    tr:last-child td { border-bottom: none; }
+    
+    .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+    .badge-dr { background: #e6f1fb; color: #185fa5; }
+    .badge-normal { background: #f5f3ff; color: #534ab7; }
+    
+    .match-yes { color: #0f6e56; font-weight: 500; text-align: center; }
+    .match-no { color: #a32d2d; font-weight: 500; text-align: center; background: #fcebeb; }
+    tr.mismatch { background: #fcebeb; }
+    
+    .pagination { display: flex; justify-content: center; gap: 8px; margin-top: 1.5rem; }
+    .pagination button { padding: 8px 12px; background: white; border: 0.5px solid #d3d1c7; border-radius: 6px; cursor: pointer; font-size: 13px; }
+    .pagination button.active { background: #185fa5; color: white; border-color: #185fa5; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Results & Analytics</h1>
+      <p>Track AI vs professional diagnoses</p>
+    </div>
+
+    <div class="controls">
+      <input type="text" placeholder="Search doctor or patient...">
+      <select>
+        <option>All diagnoses</option>
+        <option>Diabetic Retinopathy</option>
+        <option>Normal</option>
+        <option>Matches only</option>
+        <option>Mismatches only</option>
+      </select>
+      <button class="export-btn">Export</button>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <p class="stat-label">Accuracy</p>
+        <p class="stat-value" style="color: #0f6e56;">91.3%</p>
+      </div>
+      <div class="stat-card">
+        <p class="stat-label">Sensitivity</p>
+        <p class="stat-value" style="color: #185fa5;">93.2%</p>
+      </div>
+      <div class="stat-card">
+        <p class="stat-label">Specificity</p>
+        <p class="stat-value" style="color: #534ab7;">88.9%</p>
+      </div>
+      <div class="stat-card">
+        <p class="stat-label">Total cases</p>
+        <p class="stat-value" style="color: #3c3489;">342</p>
+      </div>
+    </div>
+
+    <div class="results-table">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Doctor</th>
+            <th>AI diagnosis</th>
+            <th>Professional opinion</th>
+            <th>Match</th>
+            <th>Date</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>#4521</td>
+            <td>Dr. Ahmad</td>
+            <td><span class="badge badge-dr">Diabetic Retinopathy</span></td>
+            <td>Diabetic Retinopathy</td>
+            <td class="match-yes">✓</td>
+            <td>May 24, 2026</td>
+          </tr>
+          <tr>
+            <td>#4520</td>
+            <td>Dr. Fatima</td>
+            <td><span class="badge badge-normal">Normal</span></td>
+            <td>Normal</td>
+            <td class="match-yes">✓</td>
+            <td>May 24, 2026</td>
+          </tr>
+          <tr class="mismatch">
+            <td>#4519</td>
+            <td>Dr. Fatima</td>
+            <td><span class="badge badge-normal">Normal</span></td>
+            <td>Diabetic Retinopathy</td>
+            <td class="match-no">✗</td>
+            <td>May 23, 2026</td>
+          </tr>
+          <tr>
+            <td>#4518</td>
+            <td>Dr. Ahmad</td>
+            <td><span class="badge badge-dr">Diabetic Retinopathy</span></td>
+            <td>Diabetic Retinopathy</td>
+            <td class="match-yes">✓</td>
+            <td>May 23, 2026</td>
+          </tr>
+          <tr>
+            <td>#4517</td>
+            <td>Dr. Fatima</td>
+            <td><span class="badge badge-dr">Diabetic Retinopathy</span></td>
+            <td>Diabetic Retinopathy</td>
+            <td class="match-yes">✓</td>
+            <td>May 22, 2026</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="pagination">
+      <button>← Previous</button>
+      <button class="active">1</button>
+      <button>2</button>
+      <button>Next →</button>
+    </div>
+  </div>
+</body>
+</html>
