@@ -81,6 +81,8 @@ LOGIN_HTML = """<!DOCTYPE html>
     .form-section.active { display: block; }
     
     .info-box { background: #eaf3de; border-radius: 8px; padding: 12px; margin-bottom: 1.5rem; font-size: 12px; color: #3b6d11; line-height: 1.5; }
+    .error-msg { color: #d32f2f; font-size: 13px; margin-bottom: 1rem; }
+    .loading { display: none; }
   </style>
 </head>
 <body>
@@ -97,6 +99,8 @@ LOGIN_HTML = """<!DOCTYPE html>
       </div>
 
       <div id="login" class="form-section active">
+        <div id="login-error" class="error-msg" style="display: none;"></div>
+        
         <div class="form-group">
           <label class="form-label">Email address</label>
           <input type="email" id="login-email" placeholder="doctor@clinic.com">
@@ -115,15 +119,20 @@ LOGIN_HTML = """<!DOCTYPE html>
           <button class="forgot-link">Forgot password?</button>
         </div>
 
-        <button class="submit-btn" onclick="handleLogin()">Sign in</button>
+        <button class="submit-btn" onclick="handleLogin()">
+          <span class="text">Sign in</span>
+          <span class="loading">Signing in...</span>
+        </button>
 
         <p class="signup-link">Don't have an account? <button onclick="switchTab('register')">Create one</button></p>
       </div>
 
       <div id="register" class="form-section">
+        <div id="register-error" class="error-msg" style="display: none;"></div>
+        
         <div class="form-group">
           <label class="form-label">Full name</label>
-          <input type="text" placeholder="Dr. Ahmad Alalati">
+          <input type="text" id="register-name" placeholder="Dr. Ahmad Alalati">
         </div>
 
         <div class="form-group">
@@ -137,7 +146,7 @@ LOGIN_HTML = """<!DOCTYPE html>
         </div>
 
         <div class="info-box">
-          Password must be at least 8 characters with numbers and symbols
+          Password must be at least 8 characters
         </div>
 
         <button class="submit-btn" style="background: linear-gradient(135deg, #0f6e56 0%, #085041 100%);" onclick="handleRegister()">Create account</button>
@@ -158,6 +167,15 @@ LOGIN_HTML = """<!DOCTYPE html>
     async function handleLogin() {
       const email = document.getElementById('login-email').value;
       const password = document.getElementById('login-password').value;
+      const errorDiv = document.getElementById('login-error');
+      
+      errorDiv.style.display = 'none';
+      
+      if (!email || !password) {
+        errorDiv.textContent = 'Please enter email and password';
+        errorDiv.style.display = 'block';
+        return;
+      }
       
       const res = await fetch('/auth/login', {
         method: 'POST',
@@ -169,15 +187,31 @@ LOGIN_HTML = """<!DOCTYPE html>
         const data = await res.json();
         localStorage.setItem('token', data.access_token);
         localStorage.setItem('is_admin', data.is_admin);
-        window.location.href = data.is_admin ? '/dashboard' : '/scan';
+        
+        // Redirect based on admin status
+        if (data.is_admin) {
+          window.location.href = '/dashboard';
+        } else {
+          window.location.href = '/scan';
+        }
       } else {
-        alert('Invalid credentials');
+        errorDiv.textContent = 'Invalid email or password';
+        errorDiv.style.display = 'block';
       }
     }
     
     async function handleRegister() {
       const email = document.getElementById('register-email').value;
       const password = document.getElementById('register-password').value;
+      const errorDiv = document.getElementById('register-error');
+      
+      errorDiv.style.display = 'none';
+      
+      if (!email || !password) {
+        errorDiv.textContent = 'Please fill in all fields';
+        errorDiv.style.display = 'block';
+        return;
+      }
       
       const res = await fetch('/auth/register', {
         method: 'POST',
@@ -188,9 +222,12 @@ LOGIN_HTML = """<!DOCTYPE html>
       if (res.ok) {
         const data = await res.json();
         localStorage.setItem('token', data.access_token);
+        localStorage.setItem('is_admin', data.is_admin);
         window.location.href = '/scan';
       } else {
-        alert('Registration failed');
+        const error = await res.json();
+        errorDiv.textContent = error.detail || 'Registration failed';
+        errorDiv.style.display = 'block';
       }
     }
   </script>
@@ -208,19 +245,14 @@ SCAN_HTML = """<!DOCTYPE html>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto; background: #f8f7f3; min-height: 100vh; padding: 2rem; }
     
     .container { max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); overflow: hidden; }
-    .header { background: linear-gradient(135deg, #185fa5 0%, #0f6e56 100%); padding: 2.5rem; color: white; text-align: center; }
-    .header-title { font-size: 32px; font-weight: 500; margin-bottom: 8px; }
+    .header { background: linear-gradient(135deg, #185fa5 0%, #0f6e56 100%); padding: 2.5rem; color: white; display: flex; justify-content: space-between; align-items: center; }
+    .header-left h1 { font-size: 32px; font-weight: 500; margin-bottom: 4px; }
     .header-subtitle { font-size: 14px; opacity: 0.95; }
+    .header-btns { display: flex; gap: 1rem; }
+    .header-btn { padding: 8px 16px; background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.4); border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.3s; }
+    .header-btn:hover { background: rgba(255,255,255,0.3); }
     
     .content { padding: 2.5rem; }
-    .step-indicator { display: flex; justify-content: space-between; margin-bottom: 2rem; position: relative; }
-    .step-indicator::before { content: ''; position: absolute; top: 20px; left: 0; right: 0; height: 2px; background: #e0e0e0; z-index: 0; }
-    .step { flex: 1; text-align: center; position: relative; z-index: 1; }
-    .step-number { width: 40px; height: 40px; background: #e0e0e0; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 8px; font-weight: 600; color: #888; }
-    .step.active .step-number { background: #185fa5; color: white; }
-    .step.completed .step-number { background: #0f6e56; color: white; }
-    .step-label { font-size: 13px; color: #888; font-weight: 500; }
-    
     .form-group { margin-bottom: 2rem; }
     .form-label { display: block; font-size: 12px; font-weight: 600; color: #2c2c2a; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.3px; }
     
@@ -242,7 +274,7 @@ SCAN_HTML = """<!DOCTYPE html>
     .btn-primary:hover { transform: translateY(-2px); }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; }
     
-    .results { background: #f8fafb; border-radius: 8px; padding: 1.5rem; }
+    .results { background: #f8fafb; border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
     .result-item { margin-bottom: 1.5rem; }
     .result-label { font-size: 12px; font-weight: 600; color: #888; margin-bottom: 4px; text-transform: uppercase; }
     .result-value { font-size: 18px; font-weight: 500; color: #0f6e56; }
@@ -251,26 +283,20 @@ SCAN_HTML = """<!DOCTYPE html>
 <body>
   <div class="container">
     <div class="header">
-      <div class="header-title">Retinal Scan</div>
-      <p class="header-subtitle">Upload and analyze retinal images</p>
+      <div class="header-left">
+        <h1>Retinal Scan</h1>
+        <p class="header-subtitle">Upload and analyze retinal images</p>
+      </div>
+      <div class="header-btns" id="admin-btn-container" style="display: none;">
+        <button class="header-btn" onclick="goToDashboard()">📊 Admin Dashboard</button>
+        <button class="header-btn" onclick="logout()">Logout</button>
+      </div>
+      <div class="header-btns" id="user-btn-container">
+        <button class="header-btn" onclick="logout()">Logout</button>
+      </div>
     </div>
 
     <div class="content">
-      <div class="step-indicator">
-        <div class="step active" id="step1">
-          <div class="step-number">1</div>
-          <div class="step-label">Select Eye</div>
-        </div>
-        <div class="step" id="step2">
-          <div class="step-number">2</div>
-          <div class="step-label">Upload Image</div>
-        </div>
-        <div class="step" id="step3">
-          <div class="step-number">3</div>
-          <div class="step-label">Results</div>
-        </div>
-      </div>
-
       <div class="form-group">
         <label class="form-label">Which eye?</label>
         <div class="eye-select">
@@ -303,15 +329,11 @@ SCAN_HTML = """<!DOCTYPE html>
         <button class="btn btn-primary" onclick="submitScan()">Analyze</button>
       </div>
 
-      <div id="results" style="display: none; margin-top: 2rem;">
+      <div id="results" style="display: none;">
         <div class="results">
           <div class="result-item">
             <div class="result-label">Diagnosis</div>
             <div class="result-value" id="result-diagnosis">-</div>
-          </div>
-          <div class="result-item">
-            <div class="result-label">Confidence</div>
-            <div class="result-value" id="result-confidence">-</div>
           </div>
         </div>
       </div>
@@ -319,6 +341,27 @@ SCAN_HTML = """<!DOCTYPE html>
   </div>
 
   <script>
+    function checkAdmin() {
+      const isAdmin = localStorage.getItem('is_admin') === 'true';
+      const adminContainer = document.getElementById('admin-btn-container');
+      const userContainer = document.getElementById('user-btn-container');
+      
+      if (isAdmin) {
+        adminContainer.style.display = 'flex';
+        userContainer.style.display = 'none';
+      }
+    }
+    
+    function goToDashboard() {
+      window.location.href = '/dashboard';
+    }
+    
+    function logout() {
+      localStorage.removeItem('token');
+      localStorage.removeItem('is_admin');
+      window.location.href = '/login';
+    }
+    
     async function submitScan() {
       const eye = document.querySelector('input[name="eye"]:checked').value;
       const file = document.getElementById('file-input').files[0];
@@ -352,6 +395,9 @@ SCAN_HTML = """<!DOCTYPE html>
       document.getElementById('file-input').value = '';
       document.getElementById('results').style.display = 'none';
     }
+    
+    // Check admin status on load
+    checkAdmin();
   </script>
 </body>
 </html>"""
@@ -367,8 +413,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto; background: #f8f7f3; min-height: 100vh; padding: 2rem; }
     
     .container { max-width: 1200px; margin: 0 auto; }
-    .header { background: linear-gradient(135deg, #185fa5 0%, #0f6e56 100%); padding: 2rem; color: white; border-radius: 12px; margin-bottom: 2rem; }
-    .header-title { font-size: 28px; font-weight: 500; }
+    .header { background: linear-gradient(135deg, #185fa5 0%, #0f6e56 100%); padding: 2rem; color: white; border-radius: 12px; margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
+    .header-left h1 { font-size: 28px; font-weight: 500; }
+    .header-btns { display: flex; gap: 1rem; }
+    .header-btn { padding: 8px 16px; background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.4); border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.3s; }
+    .header-btn:hover { background: rgba(255,255,255,0.3); }
     
     .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem; margin-bottom: 2rem; }
     .stat-card { background: white; padding: 1.5rem; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
@@ -394,7 +443,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <body>
   <div class="container">
     <div class="header">
-      <div class="header-title">Admin Dashboard</div>
+      <div class="header-left">
+        <h1>Admin Dashboard</h1>
+      </div>
+      <div class="header-btns">
+        <button class="header-btn" onclick="goToScan()">🔍 Use AI Scanner</button>
+        <button class="header-btn" onclick="logout()">Logout</button>
+      </div>
     </div>
 
     <div class="stats">
@@ -434,6 +489,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 
   <script>
+    function goToScan() {
+      window.location.href = '/scan';
+    }
+    
+    function logout() {
+      localStorage.removeItem('token');
+      localStorage.removeItem('is_admin');
+      window.location.href = '/login';
+    }
+    
     async function loadUsers() {
       const token = localStorage.getItem('token');
       const res = await fetch('/admin/users', {
@@ -542,7 +607,6 @@ def health():
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    """Serve login page"""
     return LOGIN_HTML
 
 
