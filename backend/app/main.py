@@ -1,12 +1,12 @@
 import hashlib
 import json
+import os
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from datetime import datetime
-import os
 
 from .config import settings
 from .db import Base, engine, get_db, SessionLocal
@@ -42,10 +42,16 @@ from .inference import (
 app = FastAPI(title="Alati Cloud - Eye Disease Screening")
 Base.metadata.create_all(bind=engine)
 
-# Mount static files folder
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
+# Mount static files folder - CORRECTED PATH FOR backend/app/main.py STRUCTURE
+# Path: backend/app/main.py -> app -> backend -> AlatiCloud -> static
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+
 if os.path.exists(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    print(f"✓ Static files mounted from: {STATIC_DIR}")
+else:
+    print(f"✗ Static folder not found at: {STATIC_DIR}")
 
 
 def _sha256(b: bytes) -> str:
@@ -126,26 +132,41 @@ def health():
 
 @app.get("/")
 async def root():
-    """Redirect to login"""
-    return FileResponse(os.path.join(STATIC_DIR, "login_improved.html")) if os.path.exists(STATIC_DIR) else HTMLResponse("Alati Cloud is running")
+    """Serve login page"""
+    login_file = os.path.join(STATIC_DIR, "login_improved.html")
+    if os.path.exists(login_file):
+        return FileResponse(login_file)
+    return HTMLResponse("Alati Cloud is running - but static files not found. Check folder structure.")
 
 
 # Serve static pages
 @app.get("/login")
 async def login_page():
-    return FileResponse(os.path.join(STATIC_DIR, "login_improved.html"))
+    login_file = os.path.join(STATIC_DIR, "login_improved.html")
+    if os.path.exists(login_file):
+        return FileResponse(login_file)
+    raise HTTPException(status_code=404, detail="Login page not found")
 
 @app.get("/scan")
 async def scan_page():
-    return FileResponse(os.path.join(STATIC_DIR, "scan_improved.html"))
+    scan_file = os.path.join(STATIC_DIR, "scan_improved.html")
+    if os.path.exists(scan_file):
+        return FileResponse(scan_file)
+    raise HTTPException(status_code=404, detail="Scan page not found")
 
 @app.get("/dashboard")
 async def dashboard_page():
-    return FileResponse(os.path.join(STATIC_DIR, "admin_dashboard.html"))
+    dashboard_file = os.path.join(STATIC_DIR, "admin_dashboard.html")
+    if os.path.exists(dashboard_file):
+        return FileResponse(dashboard_file)
+    raise HTTPException(status_code=404, detail="Dashboard page not found")
 
 @app.get("/results")
 async def results_page():
-    return FileResponse(os.path.join(STATIC_DIR, "results_page.html"))
+    results_file = os.path.join(STATIC_DIR, "results_page.html")
+    if os.path.exists(results_file):
+        return FileResponse(results_file)
+    raise HTTPException(status_code=404, detail="Results page not found")
 
 
 # ============ AUTH ENDPOINTS ============
