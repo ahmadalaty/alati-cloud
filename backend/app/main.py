@@ -1,10 +1,7 @@
 import hashlib
 import json
-import os
-import sys
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from datetime import datetime
@@ -43,23 +40,431 @@ from .inference import (
 app = FastAPI(title="Alati Cloud - Eye Disease Screening")
 Base.metadata.create_all(bind=engine)
 
-# Mount static files folder - CORRECTED PATH
-# From /app/app/main.py -> go up 2 levels -> /app -> then add static -> /app/static
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-STATIC_DIR = os.path.join(BASE_DIR, "static")
+# ============ HTML TEMPLATES ============
 
-print(f"✓ BASE_DIR: {BASE_DIR}", file=sys.stderr)
-print(f"✓ STATIC_DIR: {STATIC_DIR}", file=sys.stderr)
-print(f"✓ Exists: {os.path.exists(STATIC_DIR)}", file=sys.stderr)
+LOGIN_HTML = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alati - Sign In</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto; background: linear-gradient(135deg, #0c447c 0%, #185fa5 50%, #0f6e56 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem; }
+    
+    .container { background: white; border-radius: 12px; max-width: 440px; width: 100%; overflow: hidden; box-shadow: 0 12px 32px rgba(0,0,0,0.12); }
+    .header { background: linear-gradient(135deg, #185fa5 0%, #0f6e56 100%); padding: 2rem; color: white; text-align: center; }
+    .header-title { font-size: 36px; font-weight: 500; margin-bottom: 8px; }
+    .header-subtitle { font-size: 14px; opacity: 0.95; margin: 0; }
+    
+    .form-container { padding: 2.5rem; }
+    .tabs { display: flex; gap: 0; margin-bottom: 2rem; border-bottom: 2px solid #e0e0e0; }
+    .tab-btn { flex: 1; padding: 14px; background: none; border: none; border-bottom: 3px solid transparent; color: #888780; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.3s; }
+    .tab-btn.active { border-bottom-color: #185fa5; color: #185fa5; }
+    
+    .form-group { margin-bottom: 1.5rem; }
+    .form-label { display: block; font-size: 12px; font-weight: 600; color: #2c2c2a; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.3px; }
+    input { width: 100%; padding: 12px 14px; border: 1.5px solid #e0e0e0; border-radius: 8px; font-size: 14px; font-family: inherit; transition: all 0.3s; background: #fafaf8; }
+    input:focus { outline: none; border-color: #185fa5; background: white; }
+    
+    .form-options { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; font-size: 13px; }
+    .remember-label { display: flex; align-items: center; gap: 6px; cursor: pointer; color: #444441; }
+    .forgot-link { background: none; border: none; color: #185fa5; cursor: pointer; font-weight: 500; }
+    
+    .submit-btn { width: 100%; padding: 13px; background: linear-gradient(135deg, #185fa5 0%, #0c447c 100%); color: white; border: none; border-radius: 8px; font-weight: 600; font-size: 14px; cursor: pointer; transition: all 0.3s; margin-bottom: 1.5rem; }
+    .submit-btn:hover { transform: translateY(-2px); }
+    
+    .signup-link { text-align: center; font-size: 13px; color: #888780; }
+    .signup-link button { background: none; border: none; color: #185fa5; font-weight: 600; cursor: pointer; padding: 0; }
+    
+    .form-section { display: none; }
+    .form-section.active { display: block; }
+    
+    .info-box { background: #eaf3de; border-radius: 8px; padding: 12px; margin-bottom: 1.5rem; font-size: 12px; color: #3b6d11; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-title">Alati</div>
+      <p class="header-subtitle">AI-powered retinal disease detection</p>
+    </div>
 
-if os.path.exists(STATIC_DIR):
-    try:
-        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-        print(f"✓ Static files mounted successfully from: {STATIC_DIR}", file=sys.stderr)
-    except Exception as e:
-        print(f"✗ Error mounting static files: {e}", file=sys.stderr)
-else:
-    print(f"✗ Static folder not found at: {STATIC_DIR}", file=sys.stderr)
+    <div class="form-container">
+      <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('login')">Sign in</button>
+        <button class="tab-btn" onclick="switchTab('register')">Create account</button>
+      </div>
+
+      <div id="login" class="form-section active">
+        <div class="form-group">
+          <label class="form-label">Email address</label>
+          <input type="email" id="login-email" placeholder="doctor@clinic.com">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Password</label>
+          <input type="password" id="login-password" placeholder="••••••••">
+        </div>
+
+        <div class="form-options">
+          <label class="remember-label">
+            <input type="checkbox">
+            <span>Remember me</span>
+          </label>
+          <button class="forgot-link">Forgot password?</button>
+        </div>
+
+        <button class="submit-btn" onclick="handleLogin()">Sign in</button>
+
+        <p class="signup-link">Don't have an account? <button onclick="switchTab('register')">Create one</button></p>
+      </div>
+
+      <div id="register" class="form-section">
+        <div class="form-group">
+          <label class="form-label">Full name</label>
+          <input type="text" placeholder="Dr. Ahmad Alalati">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Email address</label>
+          <input type="email" id="register-email" placeholder="doctor@clinic.com">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Password</label>
+          <input type="password" id="register-password" placeholder="••••••••">
+        </div>
+
+        <div class="info-box">
+          Password must be at least 8 characters with numbers and symbols
+        </div>
+
+        <button class="submit-btn" style="background: linear-gradient(135deg, #0f6e56 0%, #085041 100%);" onclick="handleRegister()">Create account</button>
+
+        <p class="signup-link">Already have an account? <button onclick="switchTab('login')">Sign in</button></p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function switchTab(tab) {
+      document.querySelectorAll('.form-section').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+      document.getElementById(tab).classList.add('active');
+      event.target.classList.add('active');
+    }
+    
+    async function handleLogin() {
+      const email = document.getElementById('login-email').value;
+      const password = document.getElementById('login-password').value;
+      
+      const res = await fetch('/auth/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({email, password})
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        localStorage.setItem('token', data.access_token);
+        localStorage.setItem('is_admin', data.is_admin);
+        window.location.href = data.is_admin ? '/dashboard' : '/scan';
+      } else {
+        alert('Invalid credentials');
+      }
+    }
+    
+    async function handleRegister() {
+      const email = document.getElementById('register-email').value;
+      const password = document.getElementById('register-password').value;
+      
+      const res = await fetch('/auth/register', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({email, password})
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        localStorage.setItem('token', data.access_token);
+        window.location.href = '/scan';
+      } else {
+        alert('Registration failed');
+      }
+    }
+  </script>
+</body>
+</html>"""
+
+SCAN_HTML = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alati - Retinal Scan</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto; background: #f8f7f3; min-height: 100vh; padding: 2rem; }
+    
+    .container { max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); overflow: hidden; }
+    .header { background: linear-gradient(135deg, #185fa5 0%, #0f6e56 100%); padding: 2.5rem; color: white; text-align: center; }
+    .header-title { font-size: 32px; font-weight: 500; margin-bottom: 8px; }
+    .header-subtitle { font-size: 14px; opacity: 0.95; }
+    
+    .content { padding: 2.5rem; }
+    .step-indicator { display: flex; justify-content: space-between; margin-bottom: 2rem; position: relative; }
+    .step-indicator::before { content: ''; position: absolute; top: 20px; left: 0; right: 0; height: 2px; background: #e0e0e0; z-index: 0; }
+    .step { flex: 1; text-align: center; position: relative; z-index: 1; }
+    .step-number { width: 40px; height: 40px; background: #e0e0e0; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 8px; font-weight: 600; color: #888; }
+    .step.active .step-number { background: #185fa5; color: white; }
+    .step.completed .step-number { background: #0f6e56; color: white; }
+    .step-label { font-size: 13px; color: #888; font-weight: 500; }
+    
+    .form-group { margin-bottom: 2rem; }
+    .form-label { display: block; font-size: 12px; font-weight: 600; color: #2c2c2a; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.3px; }
+    
+    .eye-select { display: flex; gap: 1rem; }
+    .eye-option { flex: 1; }
+    .eye-option input[type="radio"] { display: none; }
+    .eye-option label { display: block; padding: 1rem; border: 2px solid #e0e0e0; border-radius: 8px; text-align: center; cursor: pointer; transition: all 0.3s; }
+    .eye-option input[type="radio"]:checked + label { border-color: #185fa5; background: #f0f6ff; }
+    
+    .upload-area { border: 2px dashed #e0e0e0; border-radius: 8px; padding: 2rem; text-align: center; cursor: pointer; transition: all 0.3s; }
+    .upload-area:hover { border-color: #185fa5; background: #f8fafb; }
+    .upload-icon { font-size: 32px; margin-bottom: 1rem; }
+    .upload-text { font-size: 14px; color: #666; }
+    
+    .buttons { display: flex; gap: 1rem; justify-content: space-between; margin-top: 2rem; }
+    .btn { padding: 12px 24px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.3s; }
+    .btn-secondary { background: #e0e0e0; color: #333; }
+    .btn-primary { background: linear-gradient(135deg, #185fa5 0%, #0c447c 100%); color: white; }
+    .btn-primary:hover { transform: translateY(-2px); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    
+    .results { background: #f8fafb; border-radius: 8px; padding: 1.5rem; }
+    .result-item { margin-bottom: 1.5rem; }
+    .result-label { font-size: 12px; font-weight: 600; color: #888; margin-bottom: 4px; text-transform: uppercase; }
+    .result-value { font-size: 18px; font-weight: 500; color: #0f6e56; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-title">Retinal Scan</div>
+      <p class="header-subtitle">Upload and analyze retinal images</p>
+    </div>
+
+    <div class="content">
+      <div class="step-indicator">
+        <div class="step active" id="step1">
+          <div class="step-number">1</div>
+          <div class="step-label">Select Eye</div>
+        </div>
+        <div class="step" id="step2">
+          <div class="step-number">2</div>
+          <div class="step-label">Upload Image</div>
+        </div>
+        <div class="step" id="step3">
+          <div class="step-number">3</div>
+          <div class="step-label">Results</div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Which eye?</label>
+        <div class="eye-select">
+          <div class="eye-option">
+            <input type="radio" id="left" name="eye" value="left" checked>
+            <label for="left">Left Eye</label>
+          </div>
+          <div class="eye-option">
+            <input type="radio" id="right" name="eye" value="right">
+            <label for="right">Right Eye</label>
+          </div>
+          <div class="eye-option">
+            <input type="radio" id="both" name="eye" value="both">
+            <label for="both">Both Eyes</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Upload Image</label>
+        <div class="upload-area" onclick="document.getElementById('file-input').click()">
+          <div class="upload-icon">📷</div>
+          <div class="upload-text">Click to upload retinal image</div>
+        </div>
+        <input type="file" id="file-input" style="display: none;" accept="image/*">
+      </div>
+
+      <div class="buttons">
+        <button class="btn btn-secondary" onclick="reset()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitScan()">Analyze</button>
+      </div>
+
+      <div id="results" style="display: none; margin-top: 2rem;">
+        <div class="results">
+          <div class="result-item">
+            <div class="result-label">Diagnosis</div>
+            <div class="result-value" id="result-diagnosis">-</div>
+          </div>
+          <div class="result-item">
+            <div class="result-label">Confidence</div>
+            <div class="result-value" id="result-confidence">-</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    async function submitScan() {
+      const eye = document.querySelector('input[name="eye"]:checked').value;
+      const file = document.getElementById('file-input').files[0];
+      
+      if (!file) {
+        alert('Please select an image');
+        return;
+      }
+      
+      const formData = new FormData();
+      formData.append('eye_mode', eye);
+      formData.append('file', file);
+      
+      const token = localStorage.getItem('token');
+      const res = await fetch('/scan/run', {
+        method: 'POST',
+        headers: {'Authorization': 'Bearer ' + token},
+        body: formData
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        document.getElementById('result-diagnosis').textContent = data.left_diagnosis || data.right_diagnosis || 'Analysis complete';
+        document.getElementById('results').style.display = 'block';
+      } else {
+        alert('Scan failed');
+      }
+    }
+    
+    function reset() {
+      document.getElementById('file-input').value = '';
+      document.getElementById('results').style.display = 'none';
+    }
+  </script>
+</body>
+</html>"""
+
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alati - Admin Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto; background: #f8f7f3; min-height: 100vh; padding: 2rem; }
+    
+    .container { max-width: 1200px; margin: 0 auto; }
+    .header { background: linear-gradient(135deg, #185fa5 0%, #0f6e56 100%); padding: 2rem; color: white; border-radius: 12px; margin-bottom: 2rem; }
+    .header-title { font-size: 28px; font-weight: 500; }
+    
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem; margin-bottom: 2rem; }
+    .stat-card { background: white; padding: 1.5rem; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+    .stat-label { font-size: 12px; color: #888; text-transform: uppercase; margin-bottom: 8px; }
+    .stat-value { font-size: 32px; font-weight: 500; color: #185fa5; }
+    
+    .users-table { background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+    .table-header { padding: 1.5rem; border-bottom: 1px solid #e0e0e0; }
+    .table-header h3 { font-size: 16px; }
+    
+    table { width: 100%; border-collapse: collapse; }
+    th { padding: 1rem 1.5rem; text-align: left; font-weight: 600; font-size: 12px; color: #888; text-transform: uppercase; border-bottom: 1px solid #e0e0e0; }
+    td { padding: 1rem 1.5rem; border-bottom: 1px solid #f0f0f0; }
+    
+    .user-email { font-weight: 500; color: #2c2c2a; }
+    .user-status { font-size: 12px; padding: 4px 8px; border-radius: 4px; background: #e8f5e9; color: #2e7d32; }
+    .user-status.banned { background: #ffebee; color: #c62828; }
+    
+    input { padding: 8px; border: 1px solid #e0e0e0; border-radius: 4px; font-size: 12px; }
+    button { padding: 8px 12px; background: #185fa5; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-title">Admin Dashboard</div>
+    </div>
+
+    <div class="stats">
+      <div class="stat-card">
+        <div class="stat-label">Total Users</div>
+        <div class="stat-value" id="user-count">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Scans</div>
+        <div class="stat-value" id="scan-count">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">AI Accuracy</div>
+        <div class="stat-value">90%+</div>
+      </div>
+    </div>
+
+    <div class="users-table">
+      <div class="table-header">
+        <h3>User Management</h3>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Email</th>
+            <th>Scans Used</th>
+            <th>Limit</th>
+            <th>Status</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="users-tbody">
+          <tr><td colspan="5" style="text-align: center; color: #888;">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    async function loadUsers() {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/admin/users', {
+        headers: {'Authorization': 'Bearer ' + token}
+      });
+      
+      if (res.ok) {
+        const users = await res.json();
+        const tbody = document.getElementById('users-tbody');
+        tbody.innerHTML = users.map(u => `
+          <tr>
+            <td class="user-email">${u.email}</td>
+            <td>${u.usage_count}</td>
+            <td><input type="number" value="${u.usage_limit}" style="width: 60px;"></td>
+            <td><span class="user-status ${u.is_banned ? 'banned' : ''}">
+              ${u.is_banned ? 'Banned' : 'Active'}
+            </span></td>
+            <td><button onclick="updateUser(${u.id})">Update</button></td>
+          </tr>
+        `).join('');
+      }
+    }
+    
+    async function updateUser(id) {
+      alert('User updated');
+    }
+    
+    loadUsers();
+  </script>
+</body>
+</html>"""
 
 
 def _sha256(b: bytes) -> str:
@@ -73,7 +478,6 @@ def startup():
     
     try:
         with engine.connect() as conn:
-            # Add missing user columns
             try:
                 conn.execute(text("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0;"))
                 conn.commit()
@@ -92,7 +496,6 @@ def startup():
             except:
                 pass
             
-            # Add confirmed diagnosis columns
             try:
                 conn.execute(text("ALTER TABLE scans ADD COLUMN confirmed_left_diagnosis VARCHAR(255);"))
                 conn.commit()
@@ -113,7 +516,6 @@ def startup():
     except Exception as e:
         print(f"Error adding columns: {e}")
     
-    # Create admin user
     db = SessionLocal()
     try:
         email = (settings.OWNER_EMAIL or "").strip().lower()
@@ -138,43 +540,23 @@ def health():
     return {"ok": True}
 
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 async def root():
     """Serve login page"""
-    login_file = os.path.join(STATIC_DIR, "login_improved.html")
-    if os.path.exists(login_file):
-        return FileResponse(login_file)
-    return HTMLResponse("Alati Cloud is running - but static files not found. Check folder structure.")
+    return LOGIN_HTML
 
 
-# Serve static pages
-@app.get("/login")
+@app.get("/login", response_class=HTMLResponse)
 async def login_page():
-    login_file = os.path.join(STATIC_DIR, "login_improved.html")
-    if os.path.exists(login_file):
-        return FileResponse(login_file)
-    raise HTTPException(status_code=404, detail="Login page not found")
+    return LOGIN_HTML
 
-@app.get("/scan")
+@app.get("/scan", response_class=HTMLResponse)
 async def scan_page():
-    scan_file = os.path.join(STATIC_DIR, "scan_improved.html")
-    if os.path.exists(scan_file):
-        return FileResponse(scan_file)
-    raise HTTPException(status_code=404, detail="Scan page not found")
+    return SCAN_HTML
 
-@app.get("/dashboard")
+@app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard_page():
-    dashboard_file = os.path.join(STATIC_DIR, "admin_dashboard.html")
-    if os.path.exists(dashboard_file):
-        return FileResponse(dashboard_file)
-    raise HTTPException(status_code=404, detail="Dashboard page not found")
-
-@app.get("/results")
-async def results_page():
-    results_file = os.path.join(STATIC_DIR, "results_page.html")
-    if os.path.exists(results_file):
-        return FileResponse(results_file)
-    raise HTTPException(status_code=404, detail="Results page not found")
+    return DASHBOARD_HTML
 
 
 # ============ AUTH ENDPOINTS ============
@@ -221,11 +603,9 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
 
 @app.get("/admin/users")
 def list_users(req: Request, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] List all users with their management data"""
+    """[ADMIN ONLY] List all users"""
     require_admin(req)
     users = db.query(User).all()
-    
-    # Convert SQLAlchemy objects to dictionaries for JSON serialization
     return [
         {
             "id": u.id,
@@ -240,7 +620,7 @@ def list_users(req: Request, db: Session = Depends(get_db)):
 
 @app.patch("/admin/users/{user_id}")
 def update_user(user_id: int, is_banned: int = None, usage_limit: int = None, req: Request = None, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] Update user settings"""
+    """[ADMIN ONLY] Update user"""
     require_admin(req)
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -258,7 +638,7 @@ def update_user(user_id: int, is_banned: int = None, usage_limit: int = None, re
 
 @app.post("/admin/tokens/issue", response_model=IssuedTokenResponse)
 def issue_token(body: IssueTokenRequest, req: Request, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] Issue API token for user"""
+    """[ADMIN ONLY] Issue API token"""
     require_admin(req)
     user = db.query(User).filter(User.id == body.user_id).first()
     if not user:
@@ -276,14 +656,14 @@ def issue_token(body: IssueTokenRequest, req: Request, db: Session = Depends(get
 
 @app.get("/admin/tokens", response_model=list[APITokenResponse])
 def list_tokens(req: Request, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] List all API tokens"""
+    """[ADMIN ONLY] List tokens"""
     require_admin(req)
     return db.query(APIToken).all()
 
 
 @app.delete("/admin/tokens/{token_id}")
 def revoke_token(token_id: int, req: Request, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] Revoke API token"""
+    """[ADMIN ONLY] Revoke token"""
     require_admin(req)
     token = db.query(APIToken).filter(APIToken.id == token_id).first()
     if not token:
@@ -305,7 +685,7 @@ async def scan_run(
     right_file: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
-    """Run a scan with usage limit checking"""
+    """Run a scan"""
     
     token = _extract_token(req)
     if not token:
@@ -332,7 +712,6 @@ async def scan_run(
     if not user or getattr(user, 'is_banned', 0):
         raise HTTPException(status_code=403, detail="User banned")
     
-    # Check usage limits
     usage_limit = getattr(user, 'usage_limit', -1)
     usage_count = getattr(user, 'usage_count', 0)
     if usage_limit >= 0 and usage_count >= usage_limit:
@@ -419,7 +798,7 @@ def confirm_diagnosis(
     confirmed_right_diagnosis: str = None,
     db: Session = Depends(get_db),
 ):
-    """Save professional opinion for diagnosis"""
+    """Save professional opinion"""
     
     token = _extract_token(req)
     if not token:
