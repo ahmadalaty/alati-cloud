@@ -82,7 +82,6 @@ LOGIN_HTML = """<!DOCTYPE html>
     
     .info-box { background: #eaf3de; border-radius: 8px; padding: 12px; margin-bottom: 1.5rem; font-size: 12px; color: #3b6d11; line-height: 1.5; }
     .error-msg { color: #d32f2f; font-size: 13px; margin-bottom: 1rem; }
-    .loading { display: none; }
   </style>
 </head>
 <body>
@@ -119,10 +118,7 @@ LOGIN_HTML = """<!DOCTYPE html>
           <button class="forgot-link">Forgot password?</button>
         </div>
 
-        <button class="submit-btn" onclick="handleLogin()">
-          <span class="text">Sign in</span>
-          <span class="loading">Signing in...</span>
-        </button>
+        <button class="submit-btn" onclick="handleLogin()">Sign in</button>
 
         <p class="signup-link">Don't have an account? <button onclick="switchTab('register')">Create one</button></p>
       </div>
@@ -177,25 +173,35 @@ LOGIN_HTML = """<!DOCTYPE html>
         return;
       }
       
-      const res = await fetch('/auth/login', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({email, password})
-      });
-      
-      if (res.ok) {
-        const data = await res.json();
-        localStorage.setItem('token', data.access_token);
-        localStorage.setItem('is_admin', data.is_admin);
+      try {
+        const res = await fetch('/auth/login', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({email, password})
+        });
         
-        // Redirect based on admin status
-        if (data.is_admin) {
-          window.location.href = '/dashboard';
+        if (res.ok) {
+          const data = await res.json();
+          localStorage.setItem('token', data.access_token);
+          localStorage.setItem('is_admin', data.is_admin ? 'true' : 'false');
+          
+          console.log('Login successful. is_admin:', data.is_admin);
+          
+          // Redirect based on admin status
+          if (data.is_admin === true) {
+            console.log('Redirecting to dashboard (admin)');
+            window.location.href = '/dashboard';
+          } else {
+            console.log('Redirecting to scan (user)');
+            window.location.href = '/scan';
+          }
         } else {
-          window.location.href = '/scan';
+          errorDiv.textContent = 'Invalid email or password';
+          errorDiv.style.display = 'block';
         }
-      } else {
-        errorDiv.textContent = 'Invalid email or password';
+      } catch (err) {
+        console.error('Login error:', err);
+        errorDiv.textContent = 'An error occurred. Please try again.';
         errorDiv.style.display = 'block';
       }
     }
@@ -213,20 +219,26 @@ LOGIN_HTML = """<!DOCTYPE html>
         return;
       }
       
-      const res = await fetch('/auth/register', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({email, password})
-      });
-      
-      if (res.ok) {
-        const data = await res.json();
-        localStorage.setItem('token', data.access_token);
-        localStorage.setItem('is_admin', data.is_admin);
-        window.location.href = '/scan';
-      } else {
-        const error = await res.json();
-        errorDiv.textContent = error.detail || 'Registration failed';
+      try {
+        const res = await fetch('/auth/register', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({email, password})
+        });
+        
+        if (res.ok) {
+          const data = await res.json();
+          localStorage.setItem('token', data.access_token);
+          localStorage.setItem('is_admin', data.is_admin ? 'true' : 'false');
+          window.location.href = '/scan';
+        } else {
+          const error = await res.json();
+          errorDiv.textContent = error.detail || 'Registration failed';
+          errorDiv.style.display = 'block';
+        }
+      } catch (err) {
+        console.error('Registration error:', err);
+        errorDiv.textContent = 'An error occurred. Please try again.';
         errorDiv.style.display = 'block';
       }
     }
@@ -287,11 +299,8 @@ SCAN_HTML = """<!DOCTYPE html>
         <h1>Retinal Scan</h1>
         <p class="header-subtitle">Upload and analyze retinal images</p>
       </div>
-      <div class="header-btns" id="admin-btn-container" style="display: none;">
-        <button class="header-btn" onclick="goToDashboard()">📊 Admin Dashboard</button>
-        <button class="header-btn" onclick="logout()">Logout</button>
-      </div>
-      <div class="header-btns" id="user-btn-container">
+      <div class="header-btns">
+        <button class="header-btn" id="admin-btn" style="display: none;" onclick="goToDashboard()">📊 Admin Dashboard</button>
         <button class="header-btn" onclick="logout()">Logout</button>
       </div>
     </div>
@@ -343,12 +352,15 @@ SCAN_HTML = """<!DOCTYPE html>
   <script>
     function checkAdmin() {
       const isAdmin = localStorage.getItem('is_admin') === 'true';
-      const adminContainer = document.getElementById('admin-btn-container');
-      const userContainer = document.getElementById('user-btn-container');
+      console.log('Checking admin status. is_admin from localStorage:', isAdmin);
       
+      const adminBtn = document.getElementById('admin-btn');
       if (isAdmin) {
-        adminContainer.style.display = 'flex';
-        userContainer.style.display = 'none';
+        adminBtn.style.display = 'block';
+        console.log('Admin button shown');
+      } else {
+        adminBtn.style.display = 'none';
+        console.log('Admin button hidden');
       }
     }
     
