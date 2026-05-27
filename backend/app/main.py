@@ -183,22 +183,13 @@ LOGIN_HTML = """<!DOCTYPE html>
         
         if (res.ok) {
           const data = await res.json();
-          console.log('Response from backend:', data);
-          console.log('is_admin from backend:', data.is_admin, typeof data.is_admin);
-          
           localStorage.setItem('token', data.access_token);
           localStorage.setItem('is_admin', data.is_admin ? 'true' : 'false');
           
-          console.log('Login successful. is_admin:', data.is_admin);
-          console.log('Stored in localStorage as:', localStorage.getItem('is_admin'));
-          
-          // Redirect based on admin status
           if (data.is_admin === true) {
-            console.log('Redirecting to dashboard (admin)');
-            window.location.href = '/dashboard';
+            setTimeout(() => window.location.href = '/dashboard', 500);
           } else {
-            console.log('Redirecting to scan (user)');
-            window.location.href = '/scan';
+            setTimeout(() => window.location.href = '/scan', 500);
           }
         } else {
           errorDiv.textContent = 'Invalid email or password';
@@ -357,15 +348,9 @@ SCAN_HTML = """<!DOCTYPE html>
   <script>
     function checkAdmin() {
       const isAdmin = localStorage.getItem('is_admin') === 'true';
-      console.log('Checking admin status. is_admin from localStorage:', isAdmin);
-      
       const adminBtn = document.getElementById('admin-btn');
       if (isAdmin) {
         adminBtn.style.display = 'block';
-        console.log('Admin button shown');
-      } else {
-        adminBtn.style.display = 'none';
-        console.log('Admin button hidden');
       }
     }
     
@@ -413,7 +398,6 @@ SCAN_HTML = """<!DOCTYPE html>
       document.getElementById('results').style.display = 'none';
     }
     
-    // Check admin status on load
     checkAdmin();
   </script>
 </body>
@@ -441,7 +425,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .stat-label { font-size: 12px; color: #888; text-transform: uppercase; margin-bottom: 8px; }
     .stat-value { font-size: 32px; font-weight: 500; color: #185fa5; }
     
-    .users-table { background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+    .section-title { font-size: 16px; font-weight: 600; margin-top: 2rem; margin-bottom: 1rem; color: #2c2c2a; }
+    
+    .table-container { background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.06); margin-bottom: 2rem; }
     .table-header { padding: 1.5rem; border-bottom: 1px solid #e0e0e0; }
     .table-header h3 { font-size: 16px; }
     
@@ -450,8 +436,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     td { padding: 1rem 1.5rem; border-bottom: 1px solid #f0f0f0; }
     
     .user-email { font-weight: 500; color: #2c2c2a; }
-    .user-status { font-size: 12px; padding: 4px 8px; border-radius: 4px; background: #e8f5e9; color: #2e7d32; }
-    .user-status.banned { background: #ffebee; color: #c62828; }
+    .status { font-size: 12px; padding: 4px 8px; border-radius: 4px; background: #e8f5e9; color: #2e7d32; }
+    .status.banned { background: #ffebee; color: #c62828; }
+    .diagnosis { font-weight: 500; }
+    .diagnosis.normal { color: #2e7d32; }
+    .diagnosis.dr { color: #d32f2f; }
     
     input { padding: 8px; border: 1px solid #e0e0e0; border-radius: 4px; font-size: 12px; }
     button { padding: 8px 12px; background: #185fa5; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; }
@@ -484,9 +473,29 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <div class="users-table">
+    <h2 class="section-title">Recent Scans</h2>
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>User Email</th>
+            <th>Eye Mode</th>
+            <th>Left Diagnosis</th>
+            <th>Right Diagnosis</th>
+            <th>Date</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="scans-tbody">
+          <tr><td colspan="6" style="text-align: center; color: #888;">Loading scans...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 class="section-title">User Management</h2>
+    <div class="table-container">
       <div class="table-header">
-        <h3>User Management</h3>
+        <h3>All Users</h3>
       </div>
       <table>
         <thead>
@@ -499,7 +508,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </tr>
         </thead>
         <tbody id="users-tbody">
-          <tr><td colspan="5" style="text-align: center; color: #888;">Loading...</td></tr>
+          <tr><td colspan="5" style="text-align: center; color: #888;">Loading users...</td></tr>
         </tbody>
       </table>
     </div>
@@ -516,6 +525,37 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       window.location.href = '/login';
     }
     
+    async function loadScans() {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/admin/scans', {
+        headers: {'Authorization': 'Bearer ' + token}
+      });
+      
+      if (res.ok) {
+        const scans = await res.json();
+        const tbody = document.getElementById('scans-tbody');
+        
+        if (scans.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #888;">No scans yet</td></tr>';
+          document.getElementById('scan-count').textContent = '0';
+          return;
+        }
+        
+        document.getElementById('scan-count').textContent = scans.length;
+        
+        tbody.innerHTML = scans.map(s => `
+          <tr>
+            <td class="user-email">${s.user_email}</td>
+            <td>${s.eye_mode}</td>
+            <td><span class="diagnosis ${s.left_diagnosis && s.left_diagnosis.toLowerCase().includes('normal') ? 'normal' : 'dr'}">${s.left_diagnosis || '-'}</span></td>
+            <td><span class="diagnosis ${s.right_diagnosis && s.right_diagnosis.toLowerCase().includes('normal') ? 'normal' : 'dr'}">${s.right_diagnosis || '-'}</span></td>
+            <td>${new Date(s.created_at).toLocaleDateString()}</td>
+            <td><span class="status">${s.status}</span></td>
+          </tr>
+        `).join('');
+      }
+    }
+    
     async function loadUsers() {
       const token = localStorage.getItem('token');
       const res = await fetch('/admin/users', {
@@ -525,12 +565,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (res.ok) {
         const users = await res.json();
         const tbody = document.getElementById('users-tbody');
+        document.getElementById('user-count').textContent = users.length;
         tbody.innerHTML = users.map(u => `
           <tr>
             <td class="user-email">${u.email}</td>
             <td>${u.usage_count}</td>
             <td><input type="number" value="${u.usage_limit}" style="width: 60px;"></td>
-            <td><span class="user-status ${u.is_banned ? 'banned' : ''}">
+            <td><span class="status ${u.is_banned ? 'banned' : ''}">
               ${u.is_banned ? 'Banned' : 'Active'}
             </span></td>
             <td><button onclick="updateUser(${u.id})">Update</button></td>
@@ -543,6 +584,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       alert('User updated');
     }
     
+    loadScans();
     loadUsers();
   </script>
 </body>
@@ -602,7 +644,6 @@ def startup():
     try:
         email = (settings.OWNER_EMAIL or "").strip().lower()
         password = (settings.OWNER_PASSWORD or "").strip()
-        print(f"[STARTUP] OWNER_EMAIL from settings: '{email}'", file=sys.stderr)
         if email and password:
             password = password[:72]
             user = db.query(User).filter(User.email == email).first()
@@ -679,10 +720,6 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     owner_email = (settings.OWNER_EMAIL or "").strip().lower()
     is_admin = email == owner_email
     
-    print(f"[LOGIN] Email: '{email}'", file=sys.stderr)
-    print(f"[LOGIN] OWNER_EMAIL: '{owner_email}'", file=sys.stderr)
-    print(f"[LOGIN] is_admin: {is_admin}", file=sys.stderr)
-    
     token = create_token({"sub": str(user.id), "email": email})
     return TokenResponse(access_token=token, user_id=user.id, is_admin=is_admin)
 
@@ -703,6 +740,27 @@ def list_users(req: Request, db: Session = Depends(get_db)):
             "usage_count": getattr(u, 'usage_count', 0),
         }
         for u in users
+    ]
+
+
+@app.get("/admin/scans")
+def list_scans(req: Request, db: Session = Depends(get_db)):
+    """[ADMIN ONLY] List all scans with user info"""
+    require_admin(req)
+    scans = db.query(Scan, User).join(User).all()
+    
+    return [
+        {
+            "id": s.Scan.id,
+            "user_id": s.Scan.user_id,
+            "user_email": s.User.email,
+            "eye_mode": s.Scan.eye_mode,
+            "left_diagnosis": s.Scan.left_diagnosis,
+            "right_diagnosis": s.Scan.right_diagnosis,
+            "status": s.Scan.status,
+            "created_at": s.Scan.created_at,
+        }
+        for s in scans
     ]
 
 
