@@ -43,48 +43,23 @@ from .inference import (
 app = FastAPI(title="Alati Cloud - Eye Disease Screening")
 Base.metadata.create_all(bind=engine)
 
-# ============ DEBUG PATH CALCULATION ============
-print(f"\n{'='*60}", file=sys.stderr)
-print(f"DEBUG: Starting path calculation...", file=sys.stderr)
-
-THIS_FILE = os.path.abspath(__file__)
-print(f"DEBUG: __file__ = {THIS_FILE}", file=sys.stderr)
-
-DIR1 = os.path.dirname(THIS_FILE)
-print(f"DEBUG: dirname(1) = {DIR1}", file=sys.stderr)
-
-DIR2 = os.path.dirname(DIR1)
-print(f"DEBUG: dirname(2) = {DIR2}", file=sys.stderr)
-
-DIR3 = os.path.dirname(DIR2)
-print(f"DEBUG: dirname(3) = {DIR3}", file=sys.stderr)
-
-BASE_DIR = DIR3
+# Mount static files folder - CORRECTED PATH
+# From /app/app/main.py -> go up 2 levels -> /app -> then add static -> /app/static
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
-print(f"DEBUG: BASE_DIR = {BASE_DIR}", file=sys.stderr)
-print(f"DEBUG: STATIC_DIR = {STATIC_DIR}", file=sys.stderr)
-print(f"DEBUG: os.path.exists(STATIC_DIR) = {os.path.exists(STATIC_DIR)}", file=sys.stderr)
+print(f"✓ BASE_DIR: {BASE_DIR}", file=sys.stderr)
+print(f"✓ STATIC_DIR: {STATIC_DIR}", file=sys.stderr)
+print(f"✓ Exists: {os.path.exists(STATIC_DIR)}", file=sys.stderr)
 
 if os.path.exists(STATIC_DIR):
     try:
-        files = os.listdir(STATIC_DIR)
-        print(f"DEBUG: Files in STATIC_DIR: {files}", file=sys.stderr)
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-        print(f"✓ Static files mounted from: {STATIC_DIR}", file=sys.stderr)
+        print(f"✓ Static files mounted successfully from: {STATIC_DIR}", file=sys.stderr)
     except Exception as e:
-        print(f"ERROR mounting static files: {e}", file=sys.stderr)
+        print(f"✗ Error mounting static files: {e}", file=sys.stderr)
 else:
-    print(f"DEBUG: Looking for folder at: {STATIC_DIR}", file=sys.stderr)
-    try:
-        base_contents = os.listdir(BASE_DIR) if os.path.exists(BASE_DIR) else []
-        print(f"DEBUG: BASE_DIR contents: {base_contents}", file=sys.stderr)
-    except Exception as e:
-        print(f"DEBUG: Could not list BASE_DIR: {e}", file=sys.stderr)
-    print(f"✗ Static folder NOT found at {STATIC_DIR}", file=sys.stderr)
-
-print(f"{'='*60}\n", file=sys.stderr)
-# ============ END DEBUG ============
+    print(f"✗ Static folder not found at: {STATIC_DIR}", file=sys.stderr)
 
 
 def _sha256(b: bytes) -> str:
