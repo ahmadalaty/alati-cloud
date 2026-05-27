@@ -698,7 +698,7 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
     
-    token = create_token({"sub": str(user.id)})
+    token = create_token({"sub": str(user.id), "email": email})
     return TokenResponse(access_token=token, user_id=user.id, is_admin=False)
 
 
@@ -712,7 +712,7 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
     is_admin = email == (settings.OWNER_EMAIL or "").strip().lower()
-    token = create_token({"sub": str(user.id)})
+    token = create_token({"sub": str(user.id), "email": email})
     return TokenResponse(access_token=token, user_id=user.id, is_admin=is_admin)
 
 

@@ -33,11 +33,11 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-def create_token(user_id: int) -> str:
+def create_token(data: dict) -> str:
     """Create JWT token for login"""
     now = int(time.time())
     payload = {
-        "sub": str(user_id),
+        **data,
         "iat": now,
         "exp": now + TOKEN_TTL_SECONDS,
     }
@@ -107,28 +107,38 @@ def require_user(req: Request) -> int:
 
 def require_admin(req: Request) -> int:
     """
-    Validate that request is from admin (OWNER_EMAIL/OWNER_PASSWORD).
-    Admin authenticates via email/password in Authorization header.
-    Format: Authorization: Bearer <email>:<password>
+    Validate that request is from admin (OWNER_EMAIL).
+    Works with JWT tokens from login OR email:password format.
+    
+    Format 1 (JWT from UI login): Authorization: Bearer <jwt_token>
+    Format 2 (Basic auth): Authorization: Bearer email:password
     """
     token = _extract_token(req)
     if not token:
         raise HTTPException(status_code=401, detail="Missing admin credentials")
 
-    # Expect format: email:password
-    if ":" not in token:
-        raise HTTPException(status_code=401, detail="Invalid admin format")
-
-    email, password = token.split(":", 1)
-    
     admin_email = (settings.OWNER_EMAIL or "").strip().lower()
     admin_password = (settings.OWNER_PASSWORD or "").strip()
     
     if not admin_email or not admin_password:
         raise HTTPException(status_code=500, detail="Admin not configured")
     
-    if email.lower() != admin_email or password != admin_password:
-        raise HTTPException(status_code=401, detail="Invalid admin credentials")
+    # Try JWT first (from UI login)
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
+        user_email = payload.get("email", "").strip().lower()
+        
+        # Check if JWT email matches admin email
+        if user_email == admin_email:
+            return int(payload.get("sub", 0))
+    except (JWTError, ValueError):
+        pass
     
-    # Return a dummy user_id for admin (0 = admin)
-    return 0
+    # Try email:password format (backward compatibility)
+    if ":" in token:
+        email, password = token.split(":", 1)
+        if email.lower() == admin_email and password == admin_password:
+            return 0  # Return dummy user_id for admin
+    
+    # Neither worked
+    raise HTTPException(status_code=401, detail="Invalid admin credentials")
