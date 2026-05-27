@@ -1,5 +1,6 @@
 import hashlib
 import json
+import sys
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
@@ -182,10 +183,14 @@ LOGIN_HTML = """<!DOCTYPE html>
         
         if (res.ok) {
           const data = await res.json();
+          console.log('Response from backend:', data);
+          console.log('is_admin from backend:', data.is_admin, typeof data.is_admin);
+          
           localStorage.setItem('token', data.access_token);
           localStorage.setItem('is_admin', data.is_admin ? 'true' : 'false');
           
           console.log('Login successful. is_admin:', data.is_admin);
+          console.log('Stored in localStorage as:', localStorage.getItem('is_admin'));
           
           // Redirect based on admin status
           if (data.is_admin === true) {
@@ -597,6 +602,7 @@ def startup():
     try:
         email = (settings.OWNER_EMAIL or "").strip().lower()
         password = (settings.OWNER_PASSWORD or "").strip()
+        print(f"[STARTUP] OWNER_EMAIL from settings: '{email}'", file=sys.stderr)
         if email and password:
             password = password[:72]
             user = db.query(User).filter(User.email == email).first()
@@ -670,7 +676,13 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    is_admin = email == (settings.OWNER_EMAIL or "").strip().lower()
+    owner_email = (settings.OWNER_EMAIL or "").strip().lower()
+    is_admin = email == owner_email
+    
+    print(f"[LOGIN] Email: '{email}'", file=sys.stderr)
+    print(f"[LOGIN] OWNER_EMAIL: '{owner_email}'", file=sys.stderr)
+    print(f"[LOGIN] is_admin: {is_admin}", file=sys.stderr)
+    
     token = create_token({"sub": str(user.id), "email": email})
     return TokenResponse(access_token=token, user_id=user.id, is_admin=is_admin)
 
