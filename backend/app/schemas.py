@@ -23,6 +23,8 @@ class LoginResponse(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    user_id: int
+    is_admin: bool
 
 
 class APITokenResponse(BaseModel):
