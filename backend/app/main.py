@@ -201,11 +201,6 @@ LOGIN_HTML = """<!DOCTYPE html>
       </div>
 
       <div id="login" class="form-section active">
-        <div id="banned-banner" class="banned-banner">
-          <div class="title">🚫 Account suspended</div>
-          <div class="text" id="banned-text">Your account has been suspended. Please contact the administrator for assistance.</div>
-        </div>
-        
         <div id="verify-banner" class="verify-banner">
           <div class="title">📧 Email not verified</div>
           <div class="text" id="verify-text">Please verify your email address before signing in. Check your inbox for the verification link.</div>
@@ -282,7 +277,6 @@ LOGIN_HTML = """<!DOCTYPE html>
     let lastEmailForResend = '';
     
     function hideAllBanners() {
-      document.getElementById('banned-banner').classList.remove('active');
       document.getElementById('verify-banner').classList.remove('active');
       document.getElementById('success-banner').classList.remove('active');
       document.getElementById('login-error').style.display = 'none';
@@ -317,7 +311,7 @@ LOGIN_HTML = """<!DOCTYPE html>
           if (data.is_admin === true) {
             setTimeout(() => window.location.href = '/dashboard', 500);
           } else {
-            setTimeout(() => window.location.href = '/scan', 500);
+            setTimeout(() => window.location.href = '/account', 500);
           }
         } else {
           let detail = 'Invalid email or password';
@@ -329,10 +323,7 @@ LOGIN_HTML = """<!DOCTYPE html>
           // Detect specific error states from the server message
           const lowDetail = detail.toLowerCase();
           
-          if (res.status === 403 && lowDetail.includes('suspended')) {
-            document.getElementById('banned-text').textContent = detail;
-            document.getElementById('banned-banner').classList.add('active');
-          } else if (res.status === 403 && (lowDetail.includes('verify') || lowDetail.includes('verification'))) {
+          if (res.status === 403 && (lowDetail.includes('verify') || lowDetail.includes('verification'))) {
             document.getElementById('verify-text').textContent = detail;
             document.getElementById('verify-banner').classList.add('active');
           } else {
@@ -383,7 +374,7 @@ LOGIN_HTML = """<!DOCTYPE html>
             // Direct login (email verification not enabled)
             localStorage.setItem('token', data.access_token);
             localStorage.setItem('is_admin', data.is_admin ? 'true' : 'false');
-            window.location.href = '/scan';
+            window.location.href = '/account';
           }
         } else {
           let detail = 'Registration failed';
@@ -504,6 +495,7 @@ SCAN_HTML = """<!DOCTYPE html>
       </div>
       <div class="header-btns">
         <button class="header-btn" id="admin-btn" style="display: none;" onclick="goToDashboard()">📊 Admin Dashboard</button>
+        <a class="header-btn" href="/account" style="text-decoration: none;">👤 My Account</a>
         <button class="header-btn" onclick="logout()">Logout</button>
       </div>
     </div>
@@ -1064,6 +1056,267 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </html>"""
 
 
+ACCOUNT_HTML = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alati - My Account</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto; background: #f8f7f3; min-height: 100vh; padding: 2rem; }
+
+    .container { max-width: 900px; margin: 0 auto; }
+    .header { background: linear-gradient(135deg, #185fa5 0%, #0f6e56 100%); padding: 2rem; color: white; border-radius: 12px; margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
+    .header-left h1 { font-size: 28px; font-weight: 500; margin-bottom: 4px; }
+    .header-left p { font-size: 14px; opacity: 0.95; }
+    .header-btns { display: flex; gap: 1rem; }
+    .header-btn { padding: 8px 16px; background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.4); border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; text-decoration: none; transition: all 0.3s; }
+    .header-btn:hover { background: rgba(255,255,255,0.3); }
+    .header-btn.disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1.5rem; margin-bottom: 2rem; }
+    .card { background: white; padding: 1.5rem; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+    .card-label { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+    .card-value { font-size: 24px; font-weight: 500; color: #2c2c2a; }
+    .card-sub { font-size: 13px; color: #666; margin-top: 6px; }
+
+    .status-pill { display: inline-block; padding: 6px 14px; border-radius: 20px; font-size: 14px; font-weight: 600; }
+    .status-pill.active { background: #e8f5e9; color: #1b5e20; }
+    .status-pill.suspended { background: #ffebee; color: #c62828; }
+
+    .ban-notice { display: none; background: #ffebee; border-left: 4px solid #c62828; border-radius: 6px; padding: 1.25rem 1.5rem; margin-bottom: 2rem; }
+    .ban-notice.active { display: block; }
+    .ban-notice h3 { color: #c62828; font-size: 16px; margin-bottom: 6px; }
+    .ban-notice p { color: #5d1818; font-size: 13px; line-height: 1.5; }
+
+    .usage-bar { background: #e0e0e0; border-radius: 4px; height: 8px; margin-top: 10px; overflow: hidden; }
+    .usage-bar-fill { height: 100%; background: linear-gradient(90deg, #2e7d32, #66bb6a); transition: width 0.4s; }
+    .usage-bar-fill.warn { background: linear-gradient(90deg, #ef6c00, #ffb74d); }
+    .usage-bar-fill.over { background: linear-gradient(90deg, #c62828, #ef5350); }
+
+    .section-title { font-size: 16px; font-weight: 600; margin-bottom: 1rem; color: #2c2c2a; }
+
+    .table-container { background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.06); margin-bottom: 2rem; }
+    .toolbar { padding: 1rem 1.5rem; border-bottom: 1px solid #e0e0e0; }
+    .toolbar h3 { font-size: 14px; font-weight: 600; }
+
+    .scroll-container { max-height: 480px; overflow-y: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    thead { position: sticky; top: 0; background: #f8f7f3; z-index: 1; }
+    th { padding: 1rem 1.5rem; text-align: left; font-weight: 600; font-size: 12px; color: #888; text-transform: uppercase; border-bottom: 1px solid #e0e0e0; }
+    td { padding: 1rem 1.5rem; border-bottom: 1px solid #f0f0f0; }
+
+    .diagnosis { font-weight: 500; }
+    .diagnosis.normal { color: #2e7d32; }
+    .diagnosis.dr { color: #d32f2f; }
+    .status { font-size: 12px; padding: 4px 8px; border-radius: 4px; background: #e8f5e9; color: #2e7d32; }
+    .status.failed { background: #ffebee; color: #c62828; }
+
+    .pagination { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.5rem; border-top: 1px solid #e0e0e0; }
+    .pagination-info { font-size: 13px; color: #888; }
+    .pagination-controls { display: flex; gap: 8px; }
+    .pagination-controls button { padding: 6px 12px; background: white; color: #185fa5; border: 1px solid #e0e0e0; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; }
+    .pagination-controls button:hover:not(:disabled) { background: #f0f6ff; }
+    .pagination-controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-left">
+        <h1>My Account</h1>
+        <p id="user-email">-</p>
+      </div>
+      <div class="header-btns">
+        <a class="header-btn" id="scan-btn" href="/scan">🔍 New Scan</a>
+        <button class="header-btn" onclick="logout()">Logout</button>
+      </div>
+    </div>
+
+    <div class="ban-notice" id="ban-notice">
+      <h3>🚫 Account Suspended</h3>
+      <p>Your account is currently suspended. You can view your previous scans below, but you can't run new scans until reactivated. Please contact the administrator at <strong>contact@nabeeh.health</strong> for assistance.</p>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-label">Status</div>
+        <span class="status-pill" id="status-pill">Loading...</span>
+      </div>
+      <div class="card">
+        <div class="card-label">Usage</div>
+        <div class="card-value" id="usage-value">-</div>
+        <div class="card-sub" id="usage-sub"></div>
+        <div class="usage-bar"><div class="usage-bar-fill" id="usage-bar"></div></div>
+      </div>
+      <div class="card">
+        <div class="card-label">Total Scans</div>
+        <div class="card-value" id="total-scans">-</div>
+        <div class="card-sub">across all time</div>
+      </div>
+    </div>
+
+    <h2 class="section-title">My Scan History</h2>
+    <div class="table-container">
+      <div class="toolbar">
+        <h3>Recent Scans</h3>
+      </div>
+      <div class="scroll-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Eye</th>
+              <th>Left Diagnosis</th>
+              <th>Right Diagnosis</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="my-scans-tbody">
+            <tr><td colspan="5" style="text-align: center; color: #888;">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="pagination">
+        <div class="pagination-info" id="my-scans-info">-</div>
+        <div class="pagination-controls">
+          <button id="my-prev" onclick="changePage(-1)">← Prev</button>
+          <button id="my-next" onclick="changePage(1)">Next →</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let myPage = 1;
+    let myTotal = 0;
+    let myPageSize = 10;
+
+    function logout() {
+      localStorage.removeItem('token');
+      localStorage.removeItem('is_admin');
+      window.location.href = '/login';
+    }
+
+    function escapeHtml(s) {
+      if (s == null) return '';
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    async function loadInfo() {
+      const token = localStorage.getItem('token');
+      if (!token) { window.location.href = '/login'; return; }
+
+      try {
+        const res = await fetch('/user/me', {
+          headers: {'Authorization': 'Bearer ' + token}
+        });
+        if (!res.ok) {
+          if (res.status === 401) { window.location.href = '/login'; return; }
+          throw new Error('Failed to load account info');
+        }
+        const u = await res.json();
+
+        document.getElementById('user-email').textContent = u.email;
+
+        // Status pill
+        const pill = document.getElementById('status-pill');
+        if (u.is_banned) {
+          pill.textContent = 'Suspended';
+          pill.className = 'status-pill suspended';
+          // Show ban notice + disable scan button
+          document.getElementById('ban-notice').classList.add('active');
+          document.getElementById('scan-btn').classList.add('disabled');
+        } else {
+          pill.textContent = 'Active';
+          pill.className = 'status-pill active';
+        }
+
+        // Usage display
+        const used = u.usage_count || 0;
+        const limit = u.usage_limit;
+        const isUnlimited = (limit === -1 || limit === null);
+        const limitDisplay = isUnlimited ? '∞' : limit;
+        document.getElementById('usage-value').textContent = `${used} / ${limitDisplay}`;
+
+        if (!isUnlimited) {
+          const pct = Math.min(100, (used / limit) * 100);
+          const bar = document.getElementById('usage-bar');
+          bar.style.width = pct + '%';
+          if (pct >= 100) { bar.classList.add('over'); document.getElementById('usage-sub').textContent = 'Limit reached'; }
+          else if (pct >= 80) { bar.classList.add('warn'); document.getElementById('usage-sub').textContent = `${limit - used} scans remaining`; }
+          else { document.getElementById('usage-sub').textContent = `${limit - used} scans remaining`; }
+        } else {
+          document.getElementById('usage-bar').style.width = '100%';
+          document.getElementById('usage-sub').textContent = 'Unlimited access';
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function changePage(delta) {
+      const maxPage = Math.max(1, Math.ceil(myTotal / myPageSize));
+      myPage = Math.max(1, Math.min(maxPage, myPage + delta));
+      loadMyScans();
+    }
+
+    async function loadMyScans() {
+      const token = localStorage.getItem('token');
+      const tbody = document.getElementById('my-scans-tbody');
+      const info = document.getElementById('my-scans-info');
+
+      try {
+        const params = new URLSearchParams({ page: myPage, page_size: myPageSize });
+        const res = await fetch('/user/scans?' + params.toString(), {
+          headers: {'Authorization': 'Bearer ' + token}
+        });
+
+        if (!res.ok) {
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #c62828;">Failed to load (' + res.status + ')</td></tr>';
+          return;
+        }
+
+        const data = await res.json();
+        const scans = data.items || [];
+        myTotal = data.total || 0;
+        document.getElementById('total-scans').textContent = myTotal;
+
+        const start = myTotal === 0 ? 0 : (myPage - 1) * myPageSize + 1;
+        const end = Math.min(myTotal, myPage * myPageSize);
+        info.textContent = myTotal === 0 ? 'No scans yet' : `Showing ${start}-${end} of ${myTotal}`;
+
+        const maxPage = Math.max(1, Math.ceil(myTotal / myPageSize));
+        document.getElementById('my-prev').disabled = (myPage <= 1);
+        document.getElementById('my-next').disabled = (myPage >= maxPage);
+
+        if (scans.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">No scans yet. Click "New Scan" above to start.</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = scans.map(s => `
+          <tr>
+            <td>${new Date(s.created_at).toLocaleString()}</td>
+            <td>${escapeHtml(s.eye_mode)}</td>
+            <td><span class="diagnosis ${s.left_diagnosis && s.left_diagnosis.toLowerCase().includes('normal') ? 'normal' : 'dr'}">${escapeHtml(s.left_diagnosis || '-')}</span></td>
+            <td><span class="diagnosis ${s.right_diagnosis && s.right_diagnosis.toLowerCase().includes('normal') ? 'normal' : 'dr'}">${escapeHtml(s.right_diagnosis || '-')}</span></td>
+            <td><span class="status ${s.status === 'failed' ? 'failed' : ''}">${escapeHtml(s.status)}</span></td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #c62828;">Error: ' + escapeHtml(e.message) + '</td></tr>';
+      }
+    }
+
+    loadInfo();
+    loadMyScans();
+  </script>
+</body>
+</html>"""
+
+
 def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
@@ -1122,6 +1375,15 @@ def startup():
                 conn.commit()
             except:
                 pass
+            
+            # Auto-grandfather: any existing users with NULL email_verified
+            # (i.e., they registered before email verification existed) get marked as verified.
+            # This prevents existing users from being locked out when SMTP is enabled later.
+            try:
+                conn.execute(text("UPDATE users SET email_verified=1 WHERE email_verified IS NULL"))
+                conn.commit()
+            except:
+                pass
     except Exception as e:
         print(f"Error adding columns: {e}")
     
@@ -1174,6 +1436,11 @@ async def scan_page():
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard_page():
     return DASHBOARD_HTML
+
+
+@app.get("/account", response_class=HTMLResponse)
+async def account_page():
+    return ACCOUNT_HTML
 
 
 # ============ AUTH ENDPOINTS ============
@@ -1320,19 +1587,16 @@ def _verification_result_page(success: bool, message: str) -> str:
 
 @app.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
-    """Login user — blocks banned users and unverified emails"""
+    """Login user — banned users CAN log in but can't scan (they see their dashboard)"""
     email = (body.email or "").strip().lower()
     user = db.query(User).filter(User.email == email).first()
     
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    # Check ban status
-    if getattr(user, 'is_banned', 0):
-        raise HTTPException(
-            status_code=403,
-            detail="Your account has been suspended. Please contact the administrator for assistance."
-        )
+    # NOTE: We do NOT block banned users from logging in.
+    # They can log in, see their suspended status on the dashboard,
+    # and view their history. The /scan/run endpoint blocks actual scanning.
     
     # Check email verification (if SMTP configured)
     if email_enabled():
@@ -1355,7 +1619,61 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     return TokenResponse(access_token=token, user_id=user.id, is_admin=is_admin)
 
 
-# ============ USER ENDPOINTS ============
+# ============ USER (SELF) ENDPOINTS — for the regular user dashboard ============
+
+@app.get("/user/me")
+def get_my_info(req: Request, db: Session = Depends(get_db)):
+    """Return the logged-in user's own info (status, usage, email)"""
+    user_id = require_user(req)
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    owner_email = (settings.OWNER_EMAIL or "").strip().lower()
+    is_admin = user.email.lower() == owner_email
+    
+    return {
+        "id": user.id,
+        "email": user.email,
+        "is_banned": getattr(user, 'is_banned', 0),
+        "usage_count": getattr(user, 'usage_count', 0),
+        "usage_limit": getattr(user, 'usage_limit', -1),
+        "is_admin": is_admin,
+    }
+
+
+@app.get("/user/scans")
+def get_my_scans(req: Request, page: int = 1, page_size: int = 10, db: Session = Depends(get_db)):
+    """Return the logged-in user's own scan history (paginated)"""
+    user_id = require_user(req)
+    
+    page = max(1, page)
+    page_size = max(1, min(50, page_size))
+    offset = (page - 1) * page_size
+    
+    query = db.query(Scan).filter(Scan.user_id == user_id)
+    total = query.count()
+    scans = query.order_by(Scan.created_at.desc()).offset(offset).limit(page_size).all()
+    
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": [
+            {
+                "id": s.id,
+                "eye_mode": s.eye_mode,
+                "left_diagnosis": s.left_diagnosis,
+                "right_diagnosis": s.right_diagnosis,
+                "status": s.status,
+                "created_at": s.created_at,
+            }
+            for s in scans
+        ],
+    }
+
+
+# ============ ADMIN USER ENDPOINTS ============
 
 @app.get("/admin/users")
 def list_users(req: Request, q: str = "", page: int = 1, page_size: int = 10, db: Session = Depends(get_db)):
