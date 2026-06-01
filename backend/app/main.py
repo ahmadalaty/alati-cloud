@@ -286,6 +286,25 @@ SCAN_HTML = """<!DOCTYPE html>
     .result-item { margin-bottom: 1.5rem; }
     .result-label { font-size: 12px; font-weight: 600; color: #888; margin-bottom: 4px; text-transform: uppercase; }
     .result-value { font-size: 18px; font-weight: 500; color: #0f6e56; }
+    
+    /* Upload states */
+    .upload-area.has-file { border-color: #0f6e56; background: #e8f5e9; }
+    .upload-area.has-file .upload-icon { color: #0f6e56; }
+    .file-name { font-size: 13px; color: #0f6e56; font-weight: 600; margin-top: 6px; word-break: break-all; }
+    
+    /* Loading spinner */
+    .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 8px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    
+    .processing-overlay { display: none; text-align: center; padding: 2rem; background: #f0f6ff; border-radius: 8px; margin-top: 1.5rem; }
+    .processing-overlay.active { display: block; }
+    .big-spinner { width: 48px; height: 48px; border: 4px solid #e0e0e0; border-top-color: #185fa5; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 1rem; }
+    .processing-text { font-size: 16px; color: #185fa5; font-weight: 600; }
+    .processing-sub { font-size: 13px; color: #666; margin-top: 4px; }
+    
+    .done-banner { display: none; background: #e8f5e9; border-left: 4px solid #2e7d32; padding: 1rem 1.5rem; border-radius: 6px; margin-top: 1.5rem; color: #1b5e20; font-weight: 600; }
+    .done-banner.active { display: block; animation: slideIn 0.4s ease; }
+    @keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
   </style>
 </head>
 <body>
@@ -322,16 +341,27 @@ SCAN_HTML = """<!DOCTYPE html>
 
       <div class="form-group">
         <label class="form-label">Upload Image</label>
-        <div class="upload-area" onclick="document.getElementById('file-input').click()">
-          <div class="upload-icon">📷</div>
-          <div class="upload-text">Click to upload retinal image</div>
+        <div class="upload-area" id="upload-area" onclick="document.getElementById('file-input').click()">
+          <div class="upload-icon" id="upload-icon">📷</div>
+          <div class="upload-text" id="upload-text">Click to upload retinal image</div>
+          <div class="file-name" id="file-name" style="display: none;"></div>
         </div>
         <input type="file" id="file-input" style="display: none;" accept="image/*">
       </div>
 
       <div class="buttons">
         <button class="btn btn-secondary" onclick="reset()">Cancel</button>
-        <button class="btn btn-primary" onclick="submitScan()">Analyze</button>
+        <button class="btn btn-primary" id="analyze-btn" onclick="submitScan()">Analyze</button>
+      </div>
+
+      <div class="processing-overlay" id="processing">
+        <div class="big-spinner"></div>
+        <div class="processing-text">Analyzing retinal image...</div>
+        <div class="processing-sub">The AI is examining the image — this usually takes 5-15 seconds</div>
+      </div>
+
+      <div class="done-banner" id="done-banner">
+        ✅ Analysis complete!
       </div>
 
       <div id="results" style="display: none;">
@@ -364,12 +394,34 @@ SCAN_HTML = """<!DOCTYPE html>
       window.location.href = '/login';
     }
     
+    // Show filename when file is selected
+    document.getElementById('file-input').addEventListener('change', function(e) {
+      const file = e.target.files[0];
+      const uploadArea = document.getElementById('upload-area');
+      const uploadIcon = document.getElementById('upload-icon');
+      const uploadText = document.getElementById('upload-text');
+      const fileName = document.getElementById('file-name');
+      
+      if (file) {
+        uploadArea.classList.add('has-file');
+        uploadIcon.textContent = '✅';
+        uploadText.textContent = 'File ready to analyze';
+        fileName.textContent = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)';
+        fileName.style.display = 'block';
+      } else {
+        uploadArea.classList.remove('has-file');
+        uploadIcon.textContent = '📷';
+        uploadText.textContent = 'Click to upload retinal image';
+        fileName.style.display = 'none';
+      }
+    });
+    
     async function submitScan() {
       const eye = document.querySelector('input[name="eye"]:checked').value;
       const file = document.getElementById('file-input').files[0];
       
       if (!file) {
-        alert('Please select an image');
+        alert('Please select an image first');
         return;
       }
       
@@ -377,25 +429,59 @@ SCAN_HTML = """<!DOCTYPE html>
       formData.append('eye_mode', eye);
       formData.append('file', file);
       
-      const token = localStorage.getItem('token');
-      const res = await fetch('/scan/run', {
-        method: 'POST',
-        headers: {'Authorization': 'Bearer ' + token},
-        body: formData
-      });
+      const analyzeBtn = document.getElementById('analyze-btn');
+      const processing = document.getElementById('processing');
+      const doneBanner = document.getElementById('done-banner');
+      const results = document.getElementById('results');
       
-      if (res.ok) {
-        const data = await res.json();
-        document.getElementById('result-diagnosis').textContent = data.left_diagnosis || data.right_diagnosis || 'Analysis complete';
-        document.getElementById('results').style.display = 'block';
-      } else {
-        alert('Scan failed');
+      // Show processing state
+      analyzeBtn.disabled = true;
+      analyzeBtn.innerHTML = '<span class="spinner"></span>Analyzing...';
+      processing.classList.add('active');
+      doneBanner.classList.remove('active');
+      results.style.display = 'none';
+      
+      const token = localStorage.getItem('token');
+      
+      try {
+        const res = await fetch('/scan/run', {
+          method: 'POST',
+          headers: {'Authorization': 'Bearer ' + token},
+          body: formData
+        });
+        
+        processing.classList.remove('active');
+        
+        if (res.ok) {
+          const data = await res.json();
+          document.getElementById('result-diagnosis').textContent = data.left_diagnosis || data.right_diagnosis || 'Analysis complete';
+          
+          // Show done banner first, then results
+          doneBanner.classList.add('active');
+          setTimeout(() => {
+            results.style.display = 'block';
+          }, 300);
+        } else {
+          alert('Scan failed (' + res.status + '). Please try again.');
+        }
+      } catch (e) {
+        processing.classList.remove('active');
+        alert('Network error: ' + e.message);
+      } finally {
+        analyzeBtn.disabled = false;
+        analyzeBtn.innerHTML = 'Analyze';
       }
     }
     
     function reset() {
       document.getElementById('file-input').value = '';
       document.getElementById('results').style.display = 'none';
+      document.getElementById('done-banner').classList.remove('active');
+      document.getElementById('processing').classList.remove('active');
+      document.getElementById('upload-area').classList.remove('has-file');
+      document.getElementById('upload-icon').textContent = '📷';
+      document.getElementById('upload-text').textContent = 'Click to upload retinal image';
+      document.getElementById('file-name').style.display = 'none';
     }
     
     checkAdmin();
@@ -501,7 +587,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <thead>
           <tr>
             <th>Email</th>
-            <th>Scans Used</th>
+            <th>Usage</th>
             <th>Limit</th>
             <th>Status</th>
             <th>Action</th>
@@ -527,13 +613,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     
     async function loadScans() {
       const token = localStorage.getItem('token');
-      const res = await fetch('/admin/scans', {
-        headers: {'Authorization': 'Bearer ' + token}
-      });
+      const tbody = document.getElementById('scans-tbody');
       
-      if (res.ok) {
+      try {
+        const res = await fetch('/admin/scans', {
+          headers: {'Authorization': 'Bearer ' + token}
+        });
+        
+        if (!res.ok) {
+          tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #c62828;">Failed to load scans (' + res.status + ')</td></tr>';
+          document.getElementById('scan-count').textContent = '!';
+          return;
+        }
+        
         const scans = await res.json();
-        const tbody = document.getElementById('scans-tbody');
         
         if (scans.length === 0) {
           tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #888;">No scans yet</td></tr>';
@@ -549,39 +642,112 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <td>${s.eye_mode}</td>
             <td><span class="diagnosis ${s.left_diagnosis && s.left_diagnosis.toLowerCase().includes('normal') ? 'normal' : 'dr'}">${s.left_diagnosis || '-'}</span></td>
             <td><span class="diagnosis ${s.right_diagnosis && s.right_diagnosis.toLowerCase().includes('normal') ? 'normal' : 'dr'}">${s.right_diagnosis || '-'}</span></td>
-            <td>${new Date(s.created_at).toLocaleDateString()}</td>
-            <td><span class="status">${s.status}</span></td>
+            <td>${new Date(s.created_at).toLocaleString()}</td>
+            <td><span class="status ${s.status === 'failed' ? 'banned' : ''}">${s.status}</span></td>
           </tr>
         `).join('');
+      } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #c62828;">Error: ' + e.message + '</td></tr>';
       }
     }
     
     async function loadUsers() {
       const token = localStorage.getItem('token');
-      const res = await fetch('/admin/users', {
-        headers: {'Authorization': 'Bearer ' + token}
-      });
-      
-      if (res.ok) {
-        const users = await res.json();
+      try {
+        const res = await fetch('/admin/users', {
+          headers: {'Authorization': 'Bearer ' + token}
+        });
+        
         const tbody = document.getElementById('users-tbody');
+        
+        if (!res.ok) {
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #c62828;">Failed to load users (' + res.status + ')</td></tr>';
+          return;
+        }
+        
+        const users = await res.json();
         document.getElementById('user-count').textContent = users.length;
-        tbody.innerHTML = users.map(u => `
-          <tr>
+        
+        if (users.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">No users yet</td></tr>';
+          return;
+        }
+        
+        tbody.innerHTML = users.map(u => {
+          const used = u.usage_count || 0;
+          const limit = u.usage_limit;
+          const limitDisplay = (limit === -1 || limit === null) ? '∞' : limit;
+          const nearLimit = (limit > 0 && used >= limit * 0.8);
+          const overLimit = (limit >= 0 && used >= limit);
+          const usageColor = overLimit ? '#c62828' : (nearLimit ? '#ef6c00' : '#2e7d32');
+          
+          return `
+          <tr id="user-row-${u.id}">
             <td class="user-email">${u.email}</td>
-            <td>${u.usage_count}</td>
-            <td><input type="number" value="${u.usage_limit}" style="width: 60px;"></td>
-            <td><span class="status ${u.is_banned ? 'banned' : ''}">
-              ${u.is_banned ? 'Banned' : 'Active'}
-            </span></td>
-            <td><button onclick="updateUser(${u.id})">Update</button></td>
+            <td style="font-weight: 600; color: ${usageColor};">${used} / ${limitDisplay}</td>
+            <td><input type="number" id="limit-${u.id}" value="${limit}" style="width: 70px;" title="Use -1 for unlimited"></td>
+            <td>
+              <select id="banned-${u.id}" style="padding: 6px; border-radius: 4px;">
+                <option value="0" ${!u.is_banned ? 'selected' : ''}>Active</option>
+                <option value="1" ${u.is_banned ? 'selected' : ''}>Banned</option>
+              </select>
+            </td>
+            <td>
+              <button onclick="updateUser(${u.id})">Save</button>
+              <button onclick="resetUsage(${u.id})" style="background: #f57c00; margin-left: 4px;" title="Reset usage count to 0">Reset</button>
+            </td>
           </tr>
-        `).join('');
+          `;
+        }).join('');
+      } catch (e) {
+        document.getElementById('users-tbody').innerHTML = '<tr><td colspan="5" style="text-align: center; color: #c62828;">Error: ' + e.message + '</td></tr>';
       }
     }
     
     async function updateUser(id) {
-      alert('User updated');
+      const token = localStorage.getItem('token');
+      const newLimit = parseInt(document.getElementById('limit-' + id).value);
+      const newBanned = parseInt(document.getElementById('banned-' + id).value);
+      
+      try {
+        const res = await fetch(`/admin/users/${id}?usage_limit=${newLimit}&is_banned=${newBanned}`, {
+          method: 'PATCH',
+          headers: {'Authorization': 'Bearer ' + token}
+        });
+        
+        if (res.ok) {
+          // Flash green to confirm save
+          const row = document.getElementById('user-row-' + id);
+          if (row) {
+            row.style.transition = 'background 0.3s';
+            row.style.background = '#e8f5e9';
+            setTimeout(() => { row.style.background = ''; }, 800);
+          }
+          loadUsers();
+        } else {
+          alert('Failed to update user: ' + res.status);
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+    
+    async function resetUsage(id) {
+      if (!confirm('Reset this user\\'s usage count to 0?')) return;
+      const token = localStorage.getItem('token');
+      try {
+        const res = await fetch(`/admin/users/${id}/reset-usage`, {
+          method: 'POST',
+          headers: {'Authorization': 'Bearer ' + token}
+        });
+        if (res.ok) {
+          loadUsers();
+        } else {
+          alert('Failed to reset usage');
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
     }
     
     loadScans();
@@ -745,9 +911,9 @@ def list_users(req: Request, db: Session = Depends(get_db)):
 
 @app.get("/admin/scans")
 def list_scans(req: Request, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] List all scans with user info"""
+    """[ADMIN ONLY] List all scans with user info (newest first)"""
     require_admin(req)
-    scans = db.query(Scan, User).join(User).all()
+    scans = db.query(Scan, User).join(User, User.id == Scan.user_id).order_by(Scan.created_at.desc()).all()
     
     return [
         {
@@ -778,6 +944,19 @@ def update_user(user_id: int, is_banned: int = None, usage_limit: int = None, re
     db.add(user)
     db.commit()
     return {"status": "updated"}
+
+
+@app.post("/admin/users/{user_id}/reset-usage")
+def reset_user_usage(user_id: int, req: Request, db: Session = Depends(get_db)):
+    """[ADMIN ONLY] Reset a user's usage_count to 0"""
+    require_admin(req)
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.usage_count = 0
+    db.add(user)
+    db.commit()
+    return {"status": "reset", "user_id": user_id, "usage_count": 0}
 
 
 # ============ TOKEN ENDPOINTS ============
