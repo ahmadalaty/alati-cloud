@@ -185,6 +185,30 @@ LOGIN_HTML = """<!DOCTYPE html>
     .success-banner.active { display: block; }
     .success-banner .title { font-size: 14px; font-weight: 600; color: #1b5e20; margin-bottom: 4px; }
     .success-banner .text { font-size: 13px; color: #1b5e20; line-height: 1.5; }
+    
+    /* ========== MOBILE RESPONSIVE ========== */
+    html, body { overflow-x: hidden; -webkit-text-size-adjust: 100%; }
+    
+    @media (max-width: 600px) {
+      body { padding: 1rem; min-height: 100vh; }
+      .container { max-width: 100%; border-radius: 10px; }
+      .header { padding: 1.5rem 1rem; }
+      .header-title { font-size: 26px; }
+      .header-subtitle { font-size: 13px; }
+      .form-container { padding: 1.5rem 1.25rem; }
+      .tabs { margin-bottom: 1.5rem; }
+      .tab-btn { padding: 12px 8px; font-size: 13px; }
+      .form-group { margin-bottom: 1.25rem; }
+      .form-label { font-size: 11px; }
+      input { padding: 11px 12px; font-size: 16px; }  /* 16px prevents iOS auto-zoom */
+      .submit-btn { padding: 14px; font-size: 15px; }
+      .form-options { font-size: 12px; flex-wrap: wrap; gap: 8px; }
+      .signup-link { font-size: 12px; }
+      .info-box { font-size: 11px; padding: 10px; }
+      .banned-banner, .verify-banner, .success-banner { padding: 12px; }
+      .banned-banner .title, .verify-banner .title, .success-banner .title { font-size: 13px; }
+      .banned-banner .text, .verify-banner .text, .success-banner .text { font-size: 12px; }
+    }
   </style>
 </head>
 <body>
@@ -484,6 +508,42 @@ SCAN_HTML = """<!DOCTYPE html>
     .enhance-toggle-text { flex: 1; }
     .enhance-toggle-title { font-size: 14px; font-weight: 600; color: #2c2c2a; }
     .enhance-toggle-desc { font-size: 12px; color: #666; margin-top: 2px; }
+    
+    /* ========== MOBILE RESPONSIVE ========== */
+    html, body { overflow-x: hidden; -webkit-text-size-adjust: 100%; max-width: 100%; }
+    
+    @media (max-width: 768px) {
+      body { padding: 1rem; }
+      .container { max-width: 100%; border-radius: 10px; }
+      .header { padding: 1.5rem 1.25rem; flex-direction: column; gap: 1rem; align-items: stretch; }
+      .header-left { text-align: center; }
+      .header-left h1 { font-size: 24px; }
+      .header-subtitle { font-size: 12px; }
+      .header-btns { justify-content: center; flex-wrap: wrap; gap: 8px; }
+      .header-btn { font-size: 11px; padding: 8px 14px; }
+      .content { padding: 1.5rem 1.25rem; }
+      .form-label { font-size: 11px; margin-bottom: 8px; }
+      .form-group { margin-bottom: 1.5rem; }
+      .eye-select { gap: 8px; }
+      .eye-option label { padding: 12px 4px; font-size: 13px; }
+      .upload-area { padding: 1.5rem 1rem; }
+      .upload-icon { font-size: 28px; }
+      .upload-text { font-size: 13px; }
+      .file-name { font-size: 12px; }
+      .enhance-toggle { padding: 12px; gap: 10px; }
+      .enhance-toggle input[type="checkbox"] { width: 22px; height: 22px; flex-shrink: 0; }
+      .enhance-toggle-title { font-size: 13px; }
+      .enhance-toggle-desc { font-size: 11px; }
+      .buttons { gap: 8px; }
+      .btn { padding: 12px 18px; font-size: 13px; flex: 1; }
+      .processing-overlay { padding: 1.5rem 1rem; }
+      .big-spinner { width: 40px; height: 40px; }
+      .processing-text { font-size: 14px; }
+      .processing-sub { font-size: 12px; }
+      .done-banner { padding: 12px; font-size: 13px; }
+      .results { padding: 1rem; }
+      .result-value { font-size: 16px; }
+    }
   </style>
 </head>
 <body>
@@ -736,6 +796,45 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .pagination-controls button { padding: 6px 12px; background: white; color: #185fa5; border: 1px solid #e0e0e0; }
     .pagination-controls button:hover:not(:disabled) { background: #f0f6ff; }
     .pagination-controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+    
+    /* ========== MOBILE RESPONSIVE ========== */
+    html, body { overflow-x: hidden; -webkit-text-size-adjust: 100%; max-width: 100%; }
+    
+    /* Tables: keep their own horizontal scroll so the PAGE doesn't shift */
+    .scroll-container { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .scroll-container table { min-width: 720px; }
+    
+    @media (max-width: 768px) {
+      body { padding: 1rem; }
+      .container { max-width: 100%; }
+      .header { padding: 1.5rem 1.25rem; flex-direction: column; gap: 1rem; align-items: stretch; border-radius: 10px; }
+      .header-left { text-align: center; }
+      .header-left h1 { font-size: 22px; }
+      .header-btns { justify-content: center; flex-wrap: wrap; gap: 8px; }
+      .header-btn { font-size: 11px; padding: 8px 14px; }
+      
+      .stats { grid-template-columns: 1fr; gap: 1rem; margin-bottom: 1.5rem; }
+      .stat-card { padding: 1.25rem; border-radius: 10px; }
+      .stat-value { font-size: 26px; }
+      
+      .section-title { font-size: 15px; }
+      
+      .toolbar { padding: 0.75rem 1rem; flex-direction: column; align-items: stretch; gap: 8px; }
+      .toolbar h3 { font-size: 13px; }
+      .search-box { max-width: 100%; }
+      .search-box input { padding: 9px 12px 9px 32px; font-size: 13px; }
+      .search-box::before { font-size: 12px; left: 10px; }
+      
+      th { padding: 0.75rem 1rem; font-size: 11px; }
+      td { padding: 0.75rem 1rem; font-size: 13px; }
+      td input[type="number"] { width: 56px !important; font-size: 12px; padding: 5px; }
+      td select { font-size: 12px; padding: 4px !important; }
+      td button { padding: 6px 10px; font-size: 11px; margin-left: 2px !important; }
+      
+      .pagination { padding: 0.75rem 1rem; flex-wrap: wrap; gap: 8px; }
+      .pagination-info { font-size: 11px; }
+      .pagination-controls button { padding: 6px 10px; font-size: 11px; }
+    }
   </style>
 </head>
 <body>
@@ -1119,6 +1218,44 @@ ACCOUNT_HTML = """<!DOCTYPE html>
     .pagination-controls button { padding: 6px 12px; background: white; color: #185fa5; border: 1px solid #e0e0e0; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; }
     .pagination-controls button:hover:not(:disabled) { background: #f0f6ff; }
     .pagination-controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+    
+    /* ========== MOBILE RESPONSIVE ========== */
+    html, body { overflow-x: hidden; -webkit-text-size-adjust: 100%; max-width: 100%; }
+    
+    /* Tables: keep their own horizontal scroll so the PAGE doesn't shift */
+    .scroll-container { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .scroll-container table { min-width: 600px; }
+    
+    @media (max-width: 768px) {
+      body { padding: 1rem; }
+      .container { max-width: 100%; }
+      .header { padding: 1.5rem 1.25rem; flex-direction: column; gap: 1rem; align-items: stretch; border-radius: 10px; }
+      .header-left { text-align: center; }
+      .header-left h1 { font-size: 22px; }
+      .header-left p { font-size: 12px; word-break: break-all; }
+      .header-btns { justify-content: center; flex-wrap: wrap; gap: 8px; }
+      .header-btn { font-size: 11px; padding: 8px 14px; }
+      
+      .ban-notice { padding: 1rem; }
+      .ban-notice h3 { font-size: 14px; }
+      .ban-notice p { font-size: 12px; }
+      
+      .cards { grid-template-columns: 1fr; gap: 1rem; margin-bottom: 1.5rem; }
+      .card { padding: 1.25rem; border-radius: 10px; }
+      .card-value { font-size: 22px; }
+      .status-pill { font-size: 13px; padding: 5px 12px; }
+      
+      .section-title { font-size: 15px; }
+      .toolbar { padding: 0.75rem 1rem; }
+      .toolbar h3 { font-size: 13px; }
+      
+      th { padding: 0.75rem 1rem; font-size: 11px; }
+      td { padding: 0.75rem 1rem; font-size: 13px; }
+      
+      .pagination { padding: 0.75rem 1rem; flex-wrap: wrap; gap: 8px; }
+      .pagination-info { font-size: 11px; }
+      .pagination-controls button { padding: 6px 10px; font-size: 11px; }
+    }
   </style>
 </head>
 <body>
