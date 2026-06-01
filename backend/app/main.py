@@ -1597,31 +1597,31 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
     if not password or len(password) < 6:
         raise HTTPException(status_code=400, detail="Password too short")
     
-    # Create user with default usage limit
-    user = User(email=email, password_hash=hash_password(password))
+    # Create user with default usage limit set DIRECTLY on the ORM model
+    # (more reliable than a follow-up UPDATE, which can silently fail)
+    user = User(
+        email=email,
+        password_hash=hash_password(password),
+        usage_limit=DEFAULT_USAGE_LIMIT,
+        usage_count=0,
+        is_banned=0,
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
     
-    # Set defaults via SQL (in case columns aren't on the ORM model yet)
+    # Set email verification fields via SQL (not in ORM model)
+    verification_token = secrets.token_urlsafe(32) if email_enabled() else None
+    email_verified = 0 if email_enabled() else 1  # Auto-verify if SMTP not configured
+    
     try:
-        verification_token = secrets.token_urlsafe(32) if email_enabled() else None
-        email_verified = 0 if email_enabled() else 1  # Auto-verify if SMTP not configured
-        
         db.execute(
-            text("UPDATE users SET usage_limit=:limit, usage_count=0, email_verified=:ver, verification_token=:tok WHERE id=:id"),
-            {
-                "limit": DEFAULT_USAGE_LIMIT,
-                "ver": email_verified,
-                "tok": verification_token,
-                "id": user.id,
-            }
+            text("UPDATE users SET email_verified=:ver, verification_token=:tok WHERE id=:id"),
+            {"ver": email_verified, "tok": verification_token, "id": user.id}
         )
         db.commit()
     except Exception as e:
-        print(f"Could not set new-user defaults: {e}")
-        verification_token = None
-        email_verified = 1
+        print(f"Could not set verification fields for user {user.id}: {e}")
     
     # If email is enabled, send verification and DON'T return a login token yet
     if email_enabled() and verification_token:
