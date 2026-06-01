@@ -8,7 +8,8 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from torchvision import models
-from PIL import Image
+from PIL import Image, ImageOps, ImageEnhance, ImageFilter
+import numpy as np
 
 BUILD_MARKER = "INFERENCE_DR_FOCUS_2026_01_24"
 
@@ -71,6 +72,60 @@ MIRROR_TTA = str(os.getenv("MIRROR_TTA", "1")).strip() == "1"       # mirror aug
 
 def _sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
+
+
+# ============ IMAGE ENHANCEMENT (Retinal-specific preprocessing) ============
+
+def enhance_retinal_image(image_bytes: bytes) -> bytes:
+    """
+    Retinal-image enhancement pipeline:
+      1. Crop black borders (find non-black bounding box of the retinal disc)
+      2. Auto-contrast (stretches histogram - helps under/overexposed images)
+      3. Unsharp mask (sharpens vessels and microaneurysms)
+      4. Mild contrast boost
+    
+    Returns enhanced image as JPEG bytes. If anything fails, returns the
+    original bytes unchanged (fail-safe).
+    """
+    try:
+        img = Image.open(BytesIO(image_bytes)).convert("RGB")
+
+        # 1. Auto-crop black borders
+        arr = np.array(img)
+        gray = arr.mean(axis=2)
+        mask = gray > 15  # threshold for "not black"
+        if mask.any():
+            rows = np.any(mask, axis=1)
+            cols = np.any(mask, axis=0)
+            r_idx = np.where(rows)[0]
+            c_idx = np.where(cols)[0]
+            if len(r_idx) > 0 and len(c_idx) > 0:
+                rmin, rmax = r_idx[0], r_idx[-1]
+                cmin, cmax = c_idx[0], c_idx[-1]
+                # Only crop if it removes meaningful border (>3% of image)
+                h, w = arr.shape[:2]
+                if (cmin > w * 0.03 or w - cmax > w * 0.03 or
+                    rmin > h * 0.03 or h - rmax > h * 0.03):
+                    img = img.crop((cmin, rmin, cmax + 1, rmax + 1))
+
+        # 2. Auto-contrast (histogram stretching) — cutoff=1 ignores top/bottom 1% outliers
+        img = ImageOps.autocontrast(img, cutoff=1)
+
+        # 3. Unsharp mask — enhances fine detail (vessels, lesions, microaneurysms)
+        img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=60, threshold=3))
+
+        # 4. Mild contrast boost (~15%)
+        img = ImageEnhance.Contrast(img).enhance(1.15)
+
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=95)
+        return buf.getvalue()
+    except Exception:
+        # Fail-safe: return original if anything goes wrong
+        return image_bytes
+
+
+# ============ END IMAGE ENHANCEMENT ============
 
 
 def _polish_name(name: str) -> str:
@@ -257,11 +312,22 @@ def choose_final_code(probs: Dict[str, float]) -> Tuple[str, str]:
         return "UNCERTAIN", f"Uncertain: N={n_prob:.3f} disease_max={disease_max:.3f}"
 
 
-def predict_raw(image_bytes: bytes) -> dict:
+def predict_raw(image_bytes: bytes, enhance: bool = False) -> dict:
     """
     Core prediction function.
     Returns all probabilities but filters final output based on ACTIVE_PHASE.
+    
+    Args:
+        image_bytes: raw image bytes
+        enhance: if True, apply retinal enhancement before inference
     """
+    # Apply enhancement if requested
+    enhanced_applied = False
+    if enhance:
+        original_size = len(image_bytes)
+        image_bytes = enhance_retinal_image(image_bytes)
+        enhanced_applied = (len(image_bytes) != original_size or enhance)
+    
     probs = probs_from_bytes(image_bytes)
 
     if probs:
@@ -292,22 +358,23 @@ def predict_raw(image_bytes: bytes) -> dict:
         "translated": translated,
         "probs": active_probs,  # Filtered by phase
         "confidence": float(probs.get(final_code, 0.0)) if final_code != "UNCERTAIN" else 0.0,
+        "enhanced": enhanced_applied,
     }
 
 
-def predict_diagnosis(image_bytes: bytes) -> str:
+def predict_diagnosis(image_bytes: bytes, enhance: bool = False) -> str:
     """
     Simple API: returns diagnosis string only.
     """
-    raw = predict_raw(image_bytes)
+    raw = predict_raw(image_bytes, enhance=enhance)
     return raw["translated"]
 
 
-def predict_debug(image_bytes: bytes) -> dict:
+def predict_debug(image_bytes: bytes, enhance: bool = False) -> dict:
     """
     Full debug output including all metadata.
     """
-    raw = predict_raw(image_bytes)
+    raw = predict_raw(image_bytes, enhance=enhance)
     return {
         "build_marker": BUILD_MARKER,
         "active_variant": ACTIVE_VARIANT,

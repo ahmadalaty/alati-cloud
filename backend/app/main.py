@@ -1,10 +1,15 @@
 import hashlib
 import json
+import os
+import secrets
+import smtplib
 import sys
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, or_
 from datetime import datetime
 
 from .config import settings
@@ -40,6 +45,84 @@ from .inference import (
 
 app = FastAPI(title="Alati Cloud - Eye Disease Screening")
 Base.metadata.create_all(bind=engine)
+
+
+# ============ APP CONFIG (env-driven) ============
+
+# Default scan limit for newly registered users (-1 = unlimited)
+DEFAULT_USAGE_LIMIT = int(os.getenv("DEFAULT_USAGE_LIMIT", "3"))
+
+# App URL (used in verification email links). Falls back to localhost if not set.
+APP_URL = os.getenv("APP_URL", "").rstrip("/") or "https://alati-cloud.onrender.com"
+
+# SMTP config (if not set, email verification is disabled — registration still works)
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+SMTP_FROM = os.getenv("SMTP_FROM", "").strip() or SMTP_USER
+
+
+def email_enabled() -> bool:
+    """Check if SMTP is configured. If not, verification is bypassed."""
+    return bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD)
+
+
+def send_verification_email(to_email: str, token: str) -> bool:
+    """
+    Send verification email. Returns True on success, False on failure.
+    If SMTP not configured, returns False (caller should auto-verify in that case).
+    """
+    if not email_enabled():
+        return False
+
+    verify_link = f"{APP_URL}/auth/verify?token={token}"
+
+    html_body = f"""
+    <html>
+    <body style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f8f7f3; padding: 2rem;">
+      <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.08);">
+        <div style="background: linear-gradient(135deg, #185fa5 0%, #0f6e56 100%); padding: 2rem; color: white; text-align: center;">
+          <h1 style="margin: 0; font-size: 28px; font-weight: 500;">Welcome to Alati</h1>
+          <p style="margin: 8px 0 0; opacity: 0.95; font-size: 14px;">AI-powered retinal disease detection</p>
+        </div>
+        <div style="padding: 2rem;">
+          <p style="font-size: 16px; color: #2c2c2a; line-height: 1.6;">Hi,</p>
+          <p style="font-size: 16px; color: #2c2c2a; line-height: 1.6;">Thanks for signing up. Please confirm your email address to activate your account.</p>
+          <div style="text-align: center; margin: 2rem 0;">
+            <a href="{verify_link}" style="background: linear-gradient(135deg, #185fa5 0%, #0c447c 100%); color: white; padding: 14px 32px; border-radius: 8px; text-decoration: none; font-weight: 600; display: inline-block;">Verify Email</a>
+          </div>
+          <p style="font-size: 13px; color: #888; line-height: 1.6;">Or copy this link into your browser:</p>
+          <p style="font-size: 13px; color: #185fa5; word-break: break-all;">{verify_link}</p>
+          <p style="font-size: 12px; color: #888; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #e0e0e0;">If you didn't create this account, you can safely ignore this email.</p>
+        </div>
+      </div>
+    </body>
+    </html>
+    """
+
+    text_body = f"Welcome to Alati!\n\nPlease verify your email by clicking this link:\n{verify_link}\n\nIf you didn't create this account, you can ignore this email."
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "Verify your Alati account"
+    msg["From"] = SMTP_FROM
+    msg["To"] = to_email
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_FROM, [to_email], msg.as_string())
+        return True
+    except Exception as e:
+        print(f"[email] Failed to send verification to {to_email}: {e}")
+        return False
+
+
+# ============ END APP CONFIG ============
+
 
 # ============ HTML TEMPLATES ============
 
@@ -83,6 +166,25 @@ LOGIN_HTML = """<!DOCTYPE html>
     
     .info-box { background: #eaf3de; border-radius: 8px; padding: 12px; margin-bottom: 1.5rem; font-size: 12px; color: #3b6d11; line-height: 1.5; }
     .error-msg { color: #d32f2f; font-size: 13px; margin-bottom: 1rem; }
+    
+    /* Banned account banner */
+    .banned-banner { display: none; background: #ffebee; border-left: 4px solid #c62828; border-radius: 6px; padding: 14px 16px; margin-bottom: 1.5rem; }
+    .banned-banner.active { display: block; }
+    .banned-banner .title { font-size: 14px; font-weight: 600; color: #c62828; margin-bottom: 4px; }
+    .banned-banner .text { font-size: 13px; color: #5d1818; line-height: 1.5; }
+    
+    /* Verification needed banner */
+    .verify-banner { display: none; background: #fff8e1; border-left: 4px solid #f57c00; border-radius: 6px; padding: 14px 16px; margin-bottom: 1.5rem; }
+    .verify-banner.active { display: block; }
+    .verify-banner .title { font-size: 14px; font-weight: 600; color: #e65100; margin-bottom: 4px; }
+    .verify-banner .text { font-size: 13px; color: #6d3700; line-height: 1.5; }
+    .verify-banner button { background: none; border: none; color: #185fa5; font-weight: 600; cursor: pointer; padding: 0; margin-top: 6px; font-size: 13px; text-decoration: underline; }
+    
+    /* Success banner (used after registration when email verification is required) */
+    .success-banner { display: none; background: #e8f5e9; border-left: 4px solid #2e7d32; border-radius: 6px; padding: 14px 16px; margin-bottom: 1.5rem; }
+    .success-banner.active { display: block; }
+    .success-banner .title { font-size: 14px; font-weight: 600; color: #1b5e20; margin-bottom: 4px; }
+    .success-banner .text { font-size: 13px; color: #1b5e20; line-height: 1.5; }
   </style>
 </head>
 <body>
@@ -99,6 +201,22 @@ LOGIN_HTML = """<!DOCTYPE html>
       </div>
 
       <div id="login" class="form-section active">
+        <div id="banned-banner" class="banned-banner">
+          <div class="title">🚫 Account suspended</div>
+          <div class="text" id="banned-text">Your account has been suspended. Please contact the administrator for assistance.</div>
+        </div>
+        
+        <div id="verify-banner" class="verify-banner">
+          <div class="title">📧 Email not verified</div>
+          <div class="text" id="verify-text">Please verify your email address before signing in. Check your inbox for the verification link.</div>
+          <button onclick="resendVerification()">Resend verification email</button>
+        </div>
+        
+        <div id="success-banner" class="success-banner">
+          <div class="title">✅ Account created</div>
+          <div class="text" id="success-text">Please check your email and click the verification link to activate your account.</div>
+        </div>
+        
         <div id="login-error" class="error-msg" style="display: none;"></div>
         
         <div class="form-group">
@@ -161,12 +279,22 @@ LOGIN_HTML = """<!DOCTYPE html>
       event.target.classList.add('active');
     }
     
+    let lastEmailForResend = '';
+    
+    function hideAllBanners() {
+      document.getElementById('banned-banner').classList.remove('active');
+      document.getElementById('verify-banner').classList.remove('active');
+      document.getElementById('success-banner').classList.remove('active');
+      document.getElementById('login-error').style.display = 'none';
+    }
+    
     async function handleLogin() {
       const email = document.getElementById('login-email').value;
       const password = document.getElementById('login-password').value;
       const errorDiv = document.getElementById('login-error');
       
-      errorDiv.style.display = 'none';
+      hideAllBanners();
+      lastEmailForResend = email;
       
       if (!email || !password) {
         errorDiv.textContent = 'Please enter email and password';
@@ -192,8 +320,25 @@ LOGIN_HTML = """<!DOCTYPE html>
             setTimeout(() => window.location.href = '/scan', 500);
           }
         } else {
-          errorDiv.textContent = 'Invalid email or password';
-          errorDiv.style.display = 'block';
+          let detail = 'Invalid email or password';
+          try {
+            const error = await res.json();
+            detail = error.detail || detail;
+          } catch (e) {}
+          
+          // Detect specific error states from the server message
+          const lowDetail = detail.toLowerCase();
+          
+          if (res.status === 403 && lowDetail.includes('suspended')) {
+            document.getElementById('banned-text').textContent = detail;
+            document.getElementById('banned-banner').classList.add('active');
+          } else if (res.status === 403 && (lowDetail.includes('verify') || lowDetail.includes('verification'))) {
+            document.getElementById('verify-text').textContent = detail;
+            document.getElementById('verify-banner').classList.add('active');
+          } else {
+            errorDiv.textContent = detail;
+            errorDiv.style.display = 'block';
+          }
         }
       } catch (err) {
         console.error('Login error:', err);
@@ -208,6 +353,7 @@ LOGIN_HTML = """<!DOCTYPE html>
       const errorDiv = document.getElementById('register-error');
       
       errorDiv.style.display = 'none';
+      hideAllBanners();
       
       if (!email || !password) {
         errorDiv.textContent = 'Please fill in all fields';
@@ -224,18 +370,53 @@ LOGIN_HTML = """<!DOCTYPE html>
         
         if (res.ok) {
           const data = await res.json();
-          localStorage.setItem('token', data.access_token);
-          localStorage.setItem('is_admin', data.is_admin ? 'true' : 'false');
-          window.location.href = '/scan';
+          
+          // Two possible success shapes: verification_sent or immediate login token
+          if (data.status === 'verification_sent') {
+            // Switch to login tab and show success banner
+            switchTab('login');
+            document.getElementById('success-text').textContent = data.message || 'Please check your email to verify your account.';
+            document.getElementById('success-banner').classList.add('active');
+            document.getElementById('login-email').value = email;
+            lastEmailForResend = email;
+          } else if (data.access_token) {
+            // Direct login (email verification not enabled)
+            localStorage.setItem('token', data.access_token);
+            localStorage.setItem('is_admin', data.is_admin ? 'true' : 'false');
+            window.location.href = '/scan';
+          }
         } else {
-          const error = await res.json();
-          errorDiv.textContent = error.detail || 'Registration failed';
+          let detail = 'Registration failed';
+          try {
+            const error = await res.json();
+            detail = error.detail || detail;
+          } catch (e) {}
+          errorDiv.textContent = detail;
           errorDiv.style.display = 'block';
         }
       } catch (err) {
         console.error('Registration error:', err);
         errorDiv.textContent = 'An error occurred. Please try again.';
         errorDiv.style.display = 'block';
+      }
+    }
+    
+    async function resendVerification() {
+      const email = lastEmailForResend || document.getElementById('login-email').value;
+      if (!email) {
+        alert('Please enter your email first');
+        return;
+      }
+      try {
+        const res = await fetch('/auth/resend-verification', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({email, password: 'placeholder'})
+        });
+        const data = await res.json();
+        alert(data.message || 'Check your email for the verification link.');
+      } catch (e) {
+        alert('Could not resend verification. Please try again.');
       }
     }
   </script>
@@ -305,6 +486,13 @@ SCAN_HTML = """<!DOCTYPE html>
     .done-banner { display: none; background: #e8f5e9; border-left: 4px solid #2e7d32; padding: 1rem 1.5rem; border-radius: 6px; margin-top: 1.5rem; color: #1b5e20; font-weight: 600; }
     .done-banner.active { display: block; animation: slideIn 0.4s ease; }
     @keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+    
+    /* Enhancement toggle */
+    .enhance-toggle { background: #fef9e6; border: 1px solid #f0c000; border-radius: 8px; padding: 1rem; margin-top: 1rem; display: flex; align-items: center; gap: 12px; }
+    .enhance-toggle input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; accent-color: #185fa5; }
+    .enhance-toggle-text { flex: 1; }
+    .enhance-toggle-title { font-size: 14px; font-weight: 600; color: #2c2c2a; }
+    .enhance-toggle-desc { font-size: 12px; color: #666; margin-top: 2px; }
   </style>
 </head>
 <body>
@@ -347,6 +535,14 @@ SCAN_HTML = """<!DOCTYPE html>
           <div class="file-name" id="file-name" style="display: none;"></div>
         </div>
         <input type="file" id="file-input" style="display: none;" accept="image/*">
+        
+        <div class="enhance-toggle">
+          <input type="checkbox" id="enhance-checkbox">
+          <div class="enhance-toggle-text">
+            <div class="enhance-toggle-title">✨ Enhance image before analysis</div>
+            <div class="enhance-toggle-desc"><strong style="color: #c62828;">⚠️ May affect diagnosis accuracy — use only when needed.</strong> The AI was trained on unenhanced images, so enhancement can sometimes hurt results. Recommended only for low-quality, dark, or blurry uploads. Try both with/without to compare.</div>
+          </div>
+        </div>
       </div>
 
       <div class="buttons">
@@ -419,6 +615,7 @@ SCAN_HTML = """<!DOCTYPE html>
     async function submitScan() {
       const eye = document.querySelector('input[name="eye"]:checked').value;
       const file = document.getElementById('file-input').files[0];
+      const enhance = document.getElementById('enhance-checkbox').checked;
       
       if (!file) {
         alert('Please select an image first');
@@ -428,6 +625,7 @@ SCAN_HTML = """<!DOCTYPE html>
       const formData = new FormData();
       formData.append('eye_mode', eye);
       formData.append('file', file);
+      formData.append('enhance', enhance ? '1' : '0');
       
       const analyzeBtn = document.getElementById('analyze-btn');
       const processing = document.getElementById('processing');
@@ -530,6 +728,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     
     input { padding: 8px; border: 1px solid #e0e0e0; border-radius: 4px; font-size: 12px; }
     button { padding: 8px 12px; background: #185fa5; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; }
+    
+    .toolbar { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.5rem; border-bottom: 1px solid #e0e0e0; gap: 1rem; }
+    .search-box { flex: 1; max-width: 320px; position: relative; }
+    .search-box input { width: 100%; padding: 10px 12px 10px 36px; font-size: 13px; border-radius: 6px; }
+    .search-box::before { content: "🔍"; position: absolute; left: 12px; top: 50%; transform: translateY(-50%); font-size: 14px; pointer-events: none; }
+    
+    .scroll-container { max-height: 480px; overflow-y: auto; }
+    .scroll-container table { width: 100%; }
+    .scroll-container thead { position: sticky; top: 0; background: #f8f7f3; z-index: 1; }
+    
+    .pagination { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.5rem; border-top: 1px solid #e0e0e0; }
+    .pagination-info { font-size: 13px; color: #888; }
+    .pagination-controls { display: flex; gap: 8px; }
+    .pagination-controls button { padding: 6px 12px; background: white; color: #185fa5; border: 1px solid #e0e0e0; }
+    .pagination-controls button:hover:not(:disabled) { background: #f0f6ff; }
+    .pagination-controls button:disabled { opacity: 0.4; cursor: not-allowed; }
   </style>
 </head>
 <body>
@@ -561,42 +775,69 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     <h2 class="section-title">Recent Scans</h2>
     <div class="table-container">
-      <table>
-        <thead>
-          <tr>
-            <th>User Email</th>
-            <th>Eye Mode</th>
-            <th>Left Diagnosis</th>
-            <th>Right Diagnosis</th>
-            <th>Date</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody id="scans-tbody">
-          <tr><td colspan="6" style="text-align: center; color: #888;">Loading scans...</td></tr>
-        </tbody>
-      </table>
+      <div class="toolbar">
+        <h3 style="font-size: 14px; font-weight: 600;">Scans</h3>
+        <div class="search-box">
+          <input type="text" id="scans-search" placeholder="Search by email or diagnosis..." oninput="onScansSearch()">
+        </div>
+      </div>
+      <div class="scroll-container">
+        <table>
+          <thead>
+            <tr>
+              <th>User Email</th>
+              <th>Eye Mode</th>
+              <th>Left Diagnosis</th>
+              <th>Right Diagnosis</th>
+              <th>Date</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="scans-tbody">
+            <tr><td colspan="6" style="text-align: center; color: #888;">Loading scans...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="pagination">
+        <div class="pagination-info" id="scans-info">-</div>
+        <div class="pagination-controls">
+          <button id="scans-prev" onclick="changeScansPage(-1)">← Prev</button>
+          <button id="scans-next" onclick="changeScansPage(1)">Next →</button>
+        </div>
+      </div>
     </div>
 
     <h2 class="section-title">User Management</h2>
     <div class="table-container">
-      <div class="table-header">
-        <h3>All Users</h3>
+      <div class="toolbar">
+        <h3 style="font-size: 14px; font-weight: 600;">All Users</h3>
+        <div class="search-box">
+          <input type="text" id="users-search" placeholder="Search by email..." oninput="onUsersSearch()">
+        </div>
       </div>
-      <table>
-        <thead>
-          <tr>
-            <th>Email</th>
-            <th>Usage</th>
-            <th>Limit</th>
-            <th>Status</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody id="users-tbody">
-          <tr><td colspan="5" style="text-align: center; color: #888;">Loading users...</td></tr>
-        </tbody>
-      </table>
+      <div class="scroll-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Email</th>
+              <th>Usage</th>
+              <th>Limit</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="users-tbody">
+            <tr><td colspan="5" style="text-align: center; color: #888;">Loading users...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="pagination">
+        <div class="pagination-info" id="users-info">-</div>
+        <div class="pagination-controls">
+          <button id="users-prev" onclick="changeUsersPage(-1)">← Prev</button>
+          <button id="users-next" onclick="changeUsersPage(1)">Next →</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -611,65 +852,126 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       window.location.href = '/login';
     }
     
+    // Pagination state
+    let scansPage = 1, scansQuery = '', scansTotal = 0, scansPageSize = 10;
+    let usersPage = 1, usersQuery = '', usersTotal = 0, usersPageSize = 10;
+    let scansSearchTimer = null, usersSearchTimer = null;
+    
+    function onScansSearch() {
+      clearTimeout(scansSearchTimer);
+      scansSearchTimer = setTimeout(() => {
+        scansQuery = document.getElementById('scans-search').value.trim();
+        scansPage = 1;
+        loadScans();
+      }, 300);
+    }
+    
+    function onUsersSearch() {
+      clearTimeout(usersSearchTimer);
+      usersSearchTimer = setTimeout(() => {
+        usersQuery = document.getElementById('users-search').value.trim();
+        usersPage = 1;
+        loadUsers();
+      }, 300);
+    }
+    
+    function changeScansPage(delta) {
+      const maxPage = Math.max(1, Math.ceil(scansTotal / scansPageSize));
+      scansPage = Math.max(1, Math.min(maxPage, scansPage + delta));
+      loadScans();
+    }
+    
+    function changeUsersPage(delta) {
+      const maxPage = Math.max(1, Math.ceil(usersTotal / usersPageSize));
+      usersPage = Math.max(1, Math.min(maxPage, usersPage + delta));
+      loadUsers();
+    }
+    
     async function loadScans() {
       const token = localStorage.getItem('token');
       const tbody = document.getElementById('scans-tbody');
+      const info = document.getElementById('scans-info');
       
       try {
-        const res = await fetch('/admin/scans', {
+        const params = new URLSearchParams({ q: scansQuery, page: scansPage, page_size: scansPageSize });
+        const res = await fetch('/admin/scans?' + params.toString(), {
           headers: {'Authorization': 'Bearer ' + token}
         });
         
         if (!res.ok) {
           tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #c62828;">Failed to load scans (' + res.status + ')</td></tr>';
           document.getElementById('scan-count').textContent = '!';
+          info.textContent = '';
           return;
         }
         
-        const scans = await res.json();
+        const data = await res.json();
+        const scans = data.items || [];
+        scansTotal = data.total || 0;
+        
+        document.getElementById('scan-count').textContent = scansTotal;
+        
+        const start = scansTotal === 0 ? 0 : (scansPage - 1) * scansPageSize + 1;
+        const end = Math.min(scansTotal, scansPage * scansPageSize);
+        info.textContent = scansTotal === 0 ? 'No results' : `Showing ${start}-${end} of ${scansTotal}`;
+        
+        const maxPage = Math.max(1, Math.ceil(scansTotal / scansPageSize));
+        document.getElementById('scans-prev').disabled = (scansPage <= 1);
+        document.getElementById('scans-next').disabled = (scansPage >= maxPage);
         
         if (scans.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #888;">No scans yet</td></tr>';
-          document.getElementById('scan-count').textContent = '0';
+          tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #888;">' + (scansQuery ? 'No scans match your search' : 'No scans yet') + '</td></tr>';
           return;
         }
-        
-        document.getElementById('scan-count').textContent = scans.length;
         
         tbody.innerHTML = scans.map(s => `
           <tr>
-            <td class="user-email">${s.user_email}</td>
-            <td>${s.eye_mode}</td>
-            <td><span class="diagnosis ${s.left_diagnosis && s.left_diagnosis.toLowerCase().includes('normal') ? 'normal' : 'dr'}">${s.left_diagnosis || '-'}</span></td>
-            <td><span class="diagnosis ${s.right_diagnosis && s.right_diagnosis.toLowerCase().includes('normal') ? 'normal' : 'dr'}">${s.right_diagnosis || '-'}</span></td>
+            <td class="user-email">${escapeHtml(s.user_email)}</td>
+            <td>${escapeHtml(s.eye_mode)}</td>
+            <td><span class="diagnosis ${s.left_diagnosis && s.left_diagnosis.toLowerCase().includes('normal') ? 'normal' : 'dr'}">${escapeHtml(s.left_diagnosis || '-')}</span></td>
+            <td><span class="diagnosis ${s.right_diagnosis && s.right_diagnosis.toLowerCase().includes('normal') ? 'normal' : 'dr'}">${escapeHtml(s.right_diagnosis || '-')}</span></td>
             <td>${new Date(s.created_at).toLocaleString()}</td>
-            <td><span class="status ${s.status === 'failed' ? 'banned' : ''}">${s.status}</span></td>
+            <td><span class="status ${s.status === 'failed' ? 'banned' : ''}">${escapeHtml(s.status)}</span></td>
           </tr>
         `).join('');
       } catch (e) {
-        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #c62828;">Error: ' + e.message + '</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #c62828;">Error: ' + escapeHtml(e.message) + '</td></tr>';
       }
     }
     
     async function loadUsers() {
       const token = localStorage.getItem('token');
+      const tbody = document.getElementById('users-tbody');
+      const info = document.getElementById('users-info');
+      
       try {
-        const res = await fetch('/admin/users', {
+        const params = new URLSearchParams({ q: usersQuery, page: usersPage, page_size: usersPageSize });
+        const res = await fetch('/admin/users?' + params.toString(), {
           headers: {'Authorization': 'Bearer ' + token}
         });
         
-        const tbody = document.getElementById('users-tbody');
-        
         if (!res.ok) {
           tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #c62828;">Failed to load users (' + res.status + ')</td></tr>';
+          info.textContent = '';
           return;
         }
         
-        const users = await res.json();
-        document.getElementById('user-count').textContent = users.length;
+        const data = await res.json();
+        const users = data.items || [];
+        usersTotal = data.total || 0;
+        
+        document.getElementById('user-count').textContent = usersTotal;
+        
+        const start = usersTotal === 0 ? 0 : (usersPage - 1) * usersPageSize + 1;
+        const end = Math.min(usersTotal, usersPage * usersPageSize);
+        info.textContent = usersTotal === 0 ? 'No results' : `Showing ${start}-${end} of ${usersTotal}`;
+        
+        const maxPage = Math.max(1, Math.ceil(usersTotal / usersPageSize));
+        document.getElementById('users-prev').disabled = (usersPage <= 1);
+        document.getElementById('users-next').disabled = (usersPage >= maxPage);
         
         if (users.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">No users yet</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">' + (usersQuery ? 'No users match your search' : 'No users yet') + '</td></tr>';
           return;
         }
         
@@ -683,7 +985,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           
           return `
           <tr id="user-row-${u.id}">
-            <td class="user-email">${u.email}</td>
+            <td class="user-email">${escapeHtml(u.email)}</td>
             <td style="font-weight: 600; color: ${usageColor};">${used} / ${limitDisplay}</td>
             <td><input type="number" id="limit-${u.id}" value="${limit}" style="width: 70px;" title="Use -1 for unlimited"></td>
             <td>
@@ -700,8 +1002,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           `;
         }).join('');
       } catch (e) {
-        document.getElementById('users-tbody').innerHTML = '<tr><td colspan="5" style="text-align: center; color: #c62828;">Error: ' + e.message + '</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #c62828;">Error: ' + escapeHtml(e.message) + '</td></tr>';
       }
+    }
+    
+    function escapeHtml(s) {
+      if (s == null) return '';
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
     
     async function updateUser(id) {
@@ -803,6 +1110,18 @@ def startup():
                 conn.commit()
             except:
                 pass
+            
+            try:
+                conn.execute(text("ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0;"))
+                conn.commit()
+            except:
+                pass
+            
+            try:
+                conn.execute(text("ALTER TABLE users ADD COLUMN verification_token VARCHAR(255);"))
+                conn.commit()
+            except:
+                pass
     except Exception as e:
         print(f"Error adding columns: {e}")
     
@@ -821,6 +1140,15 @@ def startup():
                 user.password_hash = hash_password(password)
                 db.add(user)
                 db.commit()
+            
+            # Always auto-verify admin + give unlimited usage
+            try:
+                conn = engine.connect()
+                conn.execute(text("UPDATE users SET email_verified=1, usage_limit=-1 WHERE email = :email"), {"email": email})
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"Could not update admin flags: {e}")
     finally:
         db.close()
 
@@ -850,11 +1178,11 @@ async def dashboard_page():
 
 # ============ AUTH ENDPOINTS ============
 
-@app.post("/auth/register", response_model=TokenResponse)
+@app.post("/auth/register")
 def register(body: RegisterRequest, db: Session = Depends(get_db)):
-    """Register a new user"""
+    """Register a new user with email verification (if SMTP configured)"""
     email = (body.email or "").strip().lower()
-    if not email or len(email) < 3:
+    if not email or len(email) < 3 or "@" not in email:
         raise HTTPException(status_code=400, detail="Invalid email")
     
     existing = db.query(User).filter(User.email == email).first()
@@ -865,23 +1193,160 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
     if not password or len(password) < 6:
         raise HTTPException(status_code=400, detail="Password too short")
     
+    # Create user with default usage limit
     user = User(email=email, password_hash=hash_password(password))
     db.add(user)
     db.commit()
     db.refresh(user)
     
+    # Set defaults via SQL (in case columns aren't on the ORM model yet)
+    try:
+        verification_token = secrets.token_urlsafe(32) if email_enabled() else None
+        email_verified = 0 if email_enabled() else 1  # Auto-verify if SMTP not configured
+        
+        db.execute(
+            text("UPDATE users SET usage_limit=:limit, usage_count=0, email_verified=:ver, verification_token=:tok WHERE id=:id"),
+            {
+                "limit": DEFAULT_USAGE_LIMIT,
+                "ver": email_verified,
+                "tok": verification_token,
+                "id": user.id,
+            }
+        )
+        db.commit()
+    except Exception as e:
+        print(f"Could not set new-user defaults: {e}")
+        verification_token = None
+        email_verified = 1
+    
+    # If email is enabled, send verification and DON'T return a login token yet
+    if email_enabled() and verification_token:
+        sent = send_verification_email(email, verification_token)
+        if not sent:
+            # SMTP failed — clean up the user and tell them
+            db.delete(user)
+            db.commit()
+            raise HTTPException(status_code=500, detail="Could not send verification email. Please try again.")
+        
+        return {
+            "status": "verification_sent",
+            "message": "Please check your email to verify your account before logging in.",
+            "email": email,
+        }
+    
+    # Email verification disabled — return token immediately (backward compatible)
     token = create_token({"sub": str(user.id), "email": email})
     return TokenResponse(access_token=token, user_id=user.id, is_admin=False)
 
 
+@app.get("/auth/verify", response_class=HTMLResponse)
+def verify_email(token: str, db: Session = Depends(get_db)):
+    """Verify email via link from verification email"""
+    if not token:
+        return HTMLResponse(_verification_result_page(False, "Missing verification token"))
+    
+    # Find user by token (using raw SQL since column isn't on ORM model)
+    row = db.execute(
+        text("SELECT id, email, email_verified FROM users WHERE verification_token = :tok"),
+        {"tok": token}
+    ).fetchone()
+    
+    if not row:
+        return HTMLResponse(_verification_result_page(False, "Invalid or expired verification link"))
+    
+    user_id, email, already_verified = row[0], row[1], row[2]
+    
+    if already_verified:
+        return HTMLResponse(_verification_result_page(True, "Your email is already verified. You can log in now."))
+    
+    db.execute(
+        text("UPDATE users SET email_verified=1, verification_token=NULL WHERE id=:id"),
+        {"id": user_id}
+    )
+    db.commit()
+    
+    return HTMLResponse(_verification_result_page(True, "Email verified! You can now log in."))
+
+
+@app.post("/auth/resend-verification")
+def resend_verification(body: RegisterRequest, db: Session = Depends(get_db)):
+    """Resend verification email to a registered (but unverified) user"""
+    if not email_enabled():
+        raise HTTPException(status_code=400, detail="Email verification is not enabled")
+    
+    email = (body.email or "").strip().lower()
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        # Don't reveal whether email exists
+        return {"status": "ok", "message": "If this email is registered, a verification link has been sent."}
+    
+    row = db.execute(text("SELECT email_verified FROM users WHERE id=:id"), {"id": user.id}).fetchone()
+    if row and row[0]:
+        return {"status": "ok", "message": "Account is already verified. You can log in."}
+    
+    new_token = secrets.token_urlsafe(32)
+    db.execute(
+        text("UPDATE users SET verification_token=:tok WHERE id=:id"),
+        {"tok": new_token, "id": user.id}
+    )
+    db.commit()
+    
+    send_verification_email(email, new_token)
+    return {"status": "ok", "message": "If this email is registered, a verification link has been sent."}
+
+
+def _verification_result_page(success: bool, message: str) -> str:
+    icon = "✅" if success else "⚠️"
+    color = "#0f6e56" if success else "#c62828"
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Email Verification</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; background: #f8f7f3; padding: 4rem 1rem; text-align: center; }}
+  .card {{ max-width: 440px; margin: 0 auto; background: white; border-radius: 12px; padding: 3rem 2rem; box-shadow: 0 4px 16px rgba(0,0,0,0.08); }}
+  .icon {{ font-size: 64px; margin-bottom: 1rem; }}
+  h1 {{ color: {color}; font-size: 22px; margin-bottom: 1rem; }}
+  p {{ color: #555; font-size: 15px; line-height: 1.6; margin-bottom: 2rem; }}
+  a {{ background: linear-gradient(135deg, #185fa5 0%, #0c447c 100%); color: white; padding: 12px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; display: inline-block; }}
+</style></head>
+<body>
+  <div class="card">
+    <div class="icon">{icon}</div>
+    <h1>{'Verification Successful' if success else 'Verification Failed'}</h1>
+    <p>{message}</p>
+    <a href="/login">Go to Login</a>
+  </div>
+</body></html>"""
+
+
 @app.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
-    """Login user"""
+    """Login user — blocks banned users and unverified emails"""
     email = (body.email or "").strip().lower()
     user = db.query(User).filter(User.email == email).first()
     
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Check ban status
+    if getattr(user, 'is_banned', 0):
+        raise HTTPException(
+            status_code=403,
+            detail="Your account has been suspended. Please contact the administrator for assistance."
+        )
+    
+    # Check email verification (if SMTP configured)
+    if email_enabled():
+        try:
+            row = db.execute(text("SELECT email_verified FROM users WHERE id=:id"), {"id": user.id}).fetchone()
+            if row and not row[0]:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Please verify your email before logging in. Check your inbox for the verification link."
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # If column doesn't exist yet, skip check
     
     owner_email = (settings.OWNER_EMAIL or "").strip().lower()
     is_admin = email == owner_email
@@ -893,41 +1358,79 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
 # ============ USER ENDPOINTS ============
 
 @app.get("/admin/users")
-def list_users(req: Request, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] List all users"""
+def list_users(req: Request, q: str = "", page: int = 1, page_size: int = 10, db: Session = Depends(get_db)):
+    """[ADMIN ONLY] List users with pagination + search"""
     require_admin(req)
-    users = db.query(User).all()
-    return [
-        {
-            "id": u.id,
-            "email": u.email,
-            "is_banned": getattr(u, 'is_banned', 0),
-            "usage_limit": getattr(u, 'usage_limit', -1),
-            "usage_count": getattr(u, 'usage_count', 0),
-        }
-        for u in users
-    ]
+    
+    page = max(1, page)
+    page_size = max(1, min(100, page_size))
+    offset = (page - 1) * page_size
+    
+    query = db.query(User)
+    if q:
+        like = f"%{q.lower()}%"
+        query = query.filter(User.email.ilike(like))
+    
+    total = query.count()
+    users = query.order_by(User.id.desc()).offset(offset).limit(page_size).all()
+    
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": [
+            {
+                "id": u.id,
+                "email": u.email,
+                "is_banned": getattr(u, 'is_banned', 0),
+                "usage_limit": getattr(u, 'usage_limit', -1),
+                "usage_count": getattr(u, 'usage_count', 0),
+            }
+            for u in users
+        ],
+    }
 
 
 @app.get("/admin/scans")
-def list_scans(req: Request, db: Session = Depends(get_db)):
-    """[ADMIN ONLY] List all scans with user info (newest first)"""
+def list_scans(req: Request, q: str = "", page: int = 1, page_size: int = 10, db: Session = Depends(get_db)):
+    """[ADMIN ONLY] List scans with user info, pagination + search by user email or diagnosis"""
     require_admin(req)
-    scans = db.query(Scan, User).join(User, User.id == Scan.user_id).order_by(Scan.created_at.desc()).all()
     
-    return [
-        {
-            "id": s.Scan.id,
-            "user_id": s.Scan.user_id,
-            "user_email": s.User.email,
-            "eye_mode": s.Scan.eye_mode,
-            "left_diagnosis": s.Scan.left_diagnosis,
-            "right_diagnosis": s.Scan.right_diagnosis,
-            "status": s.Scan.status,
-            "created_at": s.Scan.created_at,
-        }
-        for s in scans
-    ]
+    page = max(1, page)
+    page_size = max(1, min(100, page_size))
+    offset = (page - 1) * page_size
+    
+    query = db.query(Scan, User).join(User, User.id == Scan.user_id)
+    
+    if q:
+        like = f"%{q.lower()}%"
+        query = query.filter(or_(
+            User.email.ilike(like),
+            Scan.left_diagnosis.ilike(like),
+            Scan.right_diagnosis.ilike(like),
+        ))
+    
+    total = query.count()
+    rows = query.order_by(Scan.created_at.desc()).offset(offset).limit(page_size).all()
+    
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": [
+            {
+                "id": s.Scan.id,
+                "user_id": s.Scan.user_id,
+                "user_email": s.User.email,
+                "eye_mode": s.Scan.eye_mode,
+                "left_diagnosis": s.Scan.left_diagnosis,
+                "right_diagnosis": s.Scan.right_diagnosis,
+                "status": s.Scan.status,
+                "created_at": s.Scan.created_at,
+            }
+            for s in rows
+        ],
+    }
 
 
 @app.patch("/admin/users/{user_id}")
@@ -1008,9 +1511,13 @@ async def scan_run(
     file: UploadFile | None = File(None),
     left_file: UploadFile | None = File(None),
     right_file: UploadFile | None = File(None),
+    enhance: str = Form("0"),
     db: Session = Depends(get_db),
 ):
     """Run a scan"""
+    
+    # Parse enhance flag (form values come as strings)
+    enhance_flag = str(enhance).strip().lower() in ("1", "true", "yes", "on")
     
     token = _extract_token(req)
     if not token:
@@ -1060,8 +1567,8 @@ async def scan_run(
             put_bytes(left_key, left_bytes, left_file.content_type or "image/jpeg")
             put_bytes(right_key, right_bytes, right_file.content_type or "image/jpeg")
             
-            left_diag = predict_debug(left_bytes).get("translated") or "Uncertain"
-            right_diag = predict_debug(right_bytes).get("translated") or "Uncertain"
+            left_diag = predict_debug(left_bytes, enhance=enhance_flag).get("translated") or "Uncertain"
+            right_diag = predict_debug(right_bytes, enhance=enhance_flag).get("translated") or "Uncertain"
             
             scan = Scan(
                 user_id=user_id, 
@@ -1088,7 +1595,7 @@ async def scan_run(
         r2_key = key_for(eye_mode, new_upload_id())
         put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
         
-        diag = predict_debug(image_bytes).get("translated") or "Uncertain"
+        diag = predict_debug(image_bytes, enhance=enhance_flag).get("translated") or "Uncertain"
         
         scan = Scan(
             user_id=user_id, eye_mode=eye_mode, status="done",
