@@ -1577,101 +1577,49 @@ def _daily_limit_for_tier(tier: str) -> int:
     return PREMIUM_DAILY_LIMIT if (tier or "free").strip().lower() == "premium" else FREE_DAILY_LIMIT
 
 
+STARTUP_MIGRATIONS = [
+    "ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0;",
+    "ALTER TABLE users ADD COLUMN usage_limit INTEGER DEFAULT -1;",
+    "ALTER TABLE users ADD COLUMN usage_count INTEGER DEFAULT 0;",
+    "ALTER TABLE scans ADD COLUMN confirmed_left_diagnosis VARCHAR(255);",
+    "ALTER TABLE scans ADD COLUMN confirmed_right_diagnosis VARCHAR(255);",
+    "ALTER TABLE scans ADD COLUMN confirmed_at TIMESTAMP WITH TIME ZONE;",
+    "ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0;",
+    "ALTER TABLE users ADD COLUMN verification_token VARCHAR(255);",
+    "ALTER TABLE users ADD COLUMN usage_reset_date DATE;",
+    "ALTER TABLE users ADD COLUMN tier VARCHAR(20) DEFAULT 'free';",
+    "ALTER TABLE users ADD COLUMN paddle_customer_id VARCHAR(255);",
+    "ALTER TABLE users ADD COLUMN paddle_subscription_id VARCHAR(255);",
+    "ALTER TABLE users ADD COLUMN subscription_status VARCHAR(30);",
+]
+
+
 @app.on_event("startup")
 def startup():
     """Create tables and add missing columns"""
     Base.metadata.create_all(bind=engine)
-    
+
+    # Each DDL statement gets its own connection/transaction, so a column that
+    # already exists (a normal "already migrated" case) can't abort the
+    # transaction and cause every later statement on a shared connection to
+    # silently fail too.
+    for ddl in STARTUP_MIGRATIONS:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(ddl))
+                conn.commit()
+        except Exception:
+            pass
+
+    # Auto-grandfather: any existing users with NULL email_verified
+    # (i.e., they registered before email verification existed) get marked as verified.
+    # This prevents existing users from being locked out when SMTP is enabled later.
     try:
         with engine.connect() as conn:
-            try:
-                conn.execute(text("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0;"))
-                conn.commit()
-            except:
-                pass
-            
-            try:
-                conn.execute(text("ALTER TABLE users ADD COLUMN usage_limit INTEGER DEFAULT -1;"))
-                conn.commit()
-            except:
-                pass
-            
-            try:
-                conn.execute(text("ALTER TABLE users ADD COLUMN usage_count INTEGER DEFAULT 0;"))
-                conn.commit()
-            except:
-                pass
-            
-            try:
-                conn.execute(text("ALTER TABLE scans ADD COLUMN confirmed_left_diagnosis VARCHAR(255);"))
-                conn.commit()
-            except:
-                pass
-            
-            try:
-                conn.execute(text("ALTER TABLE scans ADD COLUMN confirmed_right_diagnosis VARCHAR(255);"))
-                conn.commit()
-            except:
-                pass
-            
-            try:
-                conn.execute(text("ALTER TABLE scans ADD COLUMN confirmed_at TIMESTAMP WITH TIME ZONE;"))
-                conn.commit()
-            except:
-                pass
-            
-            try:
-                conn.execute(text("ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0;"))
-                conn.commit()
-            except:
-                pass
-            
-            try:
-                conn.execute(text("ALTER TABLE users ADD COLUMN verification_token VARCHAR(255);"))
-                conn.commit()
-            except:
-                pass
-
-            try:
-                conn.execute(text("ALTER TABLE users ADD COLUMN usage_reset_date DATE;"))
-                conn.commit()
-            except:
-                pass
-
-            try:
-                conn.execute(text("ALTER TABLE users ADD COLUMN tier VARCHAR(20) DEFAULT 'free';"))
-                conn.commit()
-            except:
-                pass
-
-            try:
-                conn.execute(text("ALTER TABLE users ADD COLUMN paddle_customer_id VARCHAR(255);"))
-                conn.commit()
-            except:
-                pass
-
-            try:
-                conn.execute(text("ALTER TABLE users ADD COLUMN paddle_subscription_id VARCHAR(255);"))
-                conn.commit()
-            except:
-                pass
-
-            try:
-                conn.execute(text("ALTER TABLE users ADD COLUMN subscription_status VARCHAR(30);"))
-                conn.commit()
-            except:
-                pass
-
-            # Auto-grandfather: any existing users with NULL email_verified
-            # (i.e., they registered before email verification existed) get marked as verified.
-            # This prevents existing users from being locked out when SMTP is enabled later.
-            try:
-                conn.execute(text("UPDATE users SET email_verified=1 WHERE email_verified IS NULL"))
-                conn.commit()
-            except:
-                pass
+            conn.execute(text("UPDATE users SET email_verified=1 WHERE email_verified IS NULL"))
+            conn.commit()
     except Exception as e:
-        print(f"Error adding columns: {e}")
+        print(f"Error in grandfather email_verified update: {e}")
     
     db = SessionLocal()
     try:
