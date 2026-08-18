@@ -7,8 +7,10 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Request
 from jose import jwt, JWTError
 from passlib.context import CryptContext
+from sqlalchemy.orm import Session
 
 from .config import settings
+from .models import APIToken
 
 # PBKDF2 has no bcrypt 72-byte password limit.
 pwd_context = CryptContext(
@@ -67,21 +69,14 @@ def verify_api_token(token: str, token_hash: str) -> bool:
 # ============ TOKEN EXTRACTION & VALIDATION ============
 
 def _extract_token(req: Request) -> Optional[str]:
-    """Extract token from Authorization header or query params"""
-    # Authorization: Bearer <token>
+    """Extract bearer token from the Authorization header."""
     auth = req.headers.get("Authorization", "")
     if auth.lower().startswith("bearer "):
         return auth.split(" ", 1)[1].strip()
-
-    # fallback (optional): ?token=...
-    token = req.query_params.get("token")
-    if token:
-        return token.strip()
-
     return None
 
 
-def require_user(req: Request) -> int:
+def require_user(req: Request, db: Session) -> int:
     """
     Validate token and return user_id.
     Accepts both JWT tokens (from login) and API tokens (from admin issuance).
@@ -99,9 +94,11 @@ def require_user(req: Request) -> int:
     except (JWTError, ValueError):
         pass
 
-    # If JWT failed, it might be an API token
-    # For now, we'll mark it as invalid
-    # (API tokens will be checked separately in the scan endpoint)
+    # Fall back to API token (issued via /admin/tokens/issue)
+    api_token = db.query(APIToken).filter(APIToken.token_hash == hash_api_token(token)).first()
+    if api_token and api_token.is_active:
+        return api_token.user_id
+
     raise HTTPException(status_code=401, detail="Invalid token")
 
 

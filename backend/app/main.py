@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -7,7 +8,7 @@ import sys
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text, or_
 from datetime import datetime
@@ -42,6 +43,7 @@ from .inference import (
     BUILD_MARKER as INF_MARKER,
     ACTIVE_VARIANT,
 )
+from .report import create_pdf_report
 
 app = FastAPI(title="Alati Cloud - Eye Disease Screening")
 Base.metadata.create_all(bind=engine)
@@ -49,8 +51,15 @@ Base.metadata.create_all(bind=engine)
 
 # ============ APP CONFIG (env-driven) ============
 
-# Default scan limit for newly registered users (-1 = unlimited)
-DEFAULT_USAGE_LIMIT = int(os.getenv("DEFAULT_USAGE_LIMIT", "3"))
+# Daily scan limits per tier. Free/DEFAULT_USAGE_LIMIT kept as a fallback for existing Render configs.
+FREE_DAILY_LIMIT = int(os.getenv("FREE_DAILY_LIMIT", os.getenv("DEFAULT_USAGE_LIMIT", "5")))
+PREMIUM_DAILY_LIMIT = int(os.getenv("PREMIUM_DAILY_LIMIT", "50"))
+
+# Paddle billing config
+PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
+PADDLE_CLIENT_TOKEN = os.getenv("PADDLE_CLIENT_TOKEN", "").strip()
+PADDLE_PRICE_ID_PREMIUM = os.getenv("PADDLE_PRICE_ID_PREMIUM", "").strip()
+PADDLE_ENV = os.getenv("PADDLE_ENV", "sandbox").strip().lower()  # 'sandbox' or 'production'
 
 # App URL (used in verification email links). Falls back to localhost if not set.
 APP_URL = os.getenv("APP_URL", "").rstrip("/") or "https://alati-cloud.onrender.com"
@@ -166,6 +175,15 @@ LOGIN_HTML = """<!DOCTYPE html>
     
     .info-box { background: #eaf3de; border-radius: 8px; padding: 12px; margin-bottom: 1.5rem; font-size: 12px; color: #3b6d11; line-height: 1.5; }
     .error-msg { color: #d32f2f; font-size: 13px; margin-bottom: 1rem; }
+
+    /* Disclaimer / consent */
+    .disclaimer-box { background: #fff8e1; border: 1px solid #f0c000; border-radius: 8px; padding: 14px; margin-bottom: 1rem; max-height: 220px; overflow-y: auto; font-size: 12px; color: #3d3200; line-height: 1.6; }
+    .disclaimer-box h4 { font-size: 13px; margin-bottom: 6px; color: #6d5700; }
+    .disclaimer-box ul { margin: 8px 0 0 18px; }
+    .disclaimer-box li { margin-bottom: 4px; }
+    .consent-row { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 1.5rem; font-size: 13px; color: #2c2c2a; }
+    .consent-row input[type="checkbox"] { width: 18px; height: 18px; flex-shrink: 0; margin-top: 1px; cursor: pointer; accent-color: #185fa5; }
+    .consent-row label { cursor: pointer; }
     
     /* Banned account banner */
     .banned-banner { display: none; background: #ffebee; border-left: 4px solid #c62828; border-radius: 6px; padding: 14px 16px; margin-bottom: 1.5rem; }
@@ -283,6 +301,24 @@ LOGIN_HTML = """<!DOCTYPE html>
           Password must be at least 8 characters
         </div>
 
+        <div class="disclaimer-box">
+          <h4>⚠️ Important — Please Read Before Use</h4>
+          <p>This tool is an AI-based screening aid for diabetic retinopathy. It is currently in a pre-approval / research-use stage and has not yet received regulatory clearance (e.g., FDA, CE, or local Ministry of Health approval) in any jurisdiction.</p>
+          <p style="margin-top: 8px;">This tool is intended solely as a supportive aid to a licensed physician's own clinical judgment. It does not diagnose, and its output must not be used as the sole basis for any clinical decision. All findings should be independently verified by the treating physician.</p>
+          <p style="margin-top: 8px;">By creating an account and using this tool, you confirm that:</p>
+          <ul>
+            <li>You are a licensed medical professional using this tool within your own clinical judgment and responsibility</li>
+            <li>You understand this tool has not received regulatory approval and are choosing to use it in its current pre-approval state</li>
+            <li>You will not rely on this tool as a sole or final diagnostic determination</li>
+            <li>You accept full responsibility for clinical decisions made in your practice, including any use of this tool's output</li>
+          </ul>
+        </div>
+
+        <div class="consent-row">
+          <input type="checkbox" id="register-consent">
+          <label for="register-consent">I have read and understood the above, and I agree to these terms.</label>
+        </div>
+
         <button class="submit-btn" style="background: linear-gradient(135deg, #0f6e56 0%, #085041 100%);" onclick="handleRegister()">Create account</button>
 
         <p class="signup-link">Already have an account? <button onclick="switchTab('login')">Sign in</button></p>
@@ -365,17 +401,24 @@ LOGIN_HTML = """<!DOCTYPE html>
     async function handleRegister() {
       const email = document.getElementById('register-email').value;
       const password = document.getElementById('register-password').value;
+      const consent = document.getElementById('register-consent').checked;
       const errorDiv = document.getElementById('register-error');
-      
+
       errorDiv.style.display = 'none';
       hideAllBanners();
-      
+
       if (!email || !password) {
         errorDiv.textContent = 'Please fill in all fields';
         errorDiv.style.display = 'block';
         return;
       }
-      
+
+      if (!consent) {
+        errorDiv.textContent = 'Please read and agree to the disclaimer above before creating an account';
+        errorDiv.style.display = 'block';
+        return;
+      }
+
       try {
         const res = await fetch('/auth/register', {
           method: 'POST',
@@ -1161,6 +1204,7 @@ ACCOUNT_HTML = """<!DOCTYPE html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Alati - My Account</title>
+  <script src="https://cdn.paddle.com/paddle/v2/paddle.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto; background: #f8f7f3; min-height: 100vh; padding: 2rem; }
@@ -1282,7 +1326,7 @@ ACCOUNT_HTML = """<!DOCTYPE html>
         <span class="status-pill" id="status-pill">Loading...</span>
       </div>
       <div class="card">
-        <div class="card-label">Usage</div>
+        <div class="card-label">Usage Today</div>
         <div class="card-value" id="usage-value">-</div>
         <div class="card-sub" id="usage-sub"></div>
         <div class="usage-bar"><div class="usage-bar-fill" id="usage-bar"></div></div>
@@ -1291,6 +1335,12 @@ ACCOUNT_HTML = """<!DOCTYPE html>
         <div class="card-label">Total Scans</div>
         <div class="card-value" id="total-scans">-</div>
         <div class="card-sub">across all time</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Plan</div>
+        <div class="card-value" id="plan-value">-</div>
+        <div class="card-sub" id="plan-sub"></div>
+        <button class="header-btn" id="upgrade-btn" style="display:none; margin-top: 10px; background: linear-gradient(135deg, #0f6e56 0%, #085041 100%); border-color: transparent; color: white;" onclick="openUpgradeCheckout()">⭐ Upgrade to Premium</button>
       </div>
     </div>
 
@@ -1329,11 +1379,52 @@ ACCOUNT_HTML = """<!DOCTYPE html>
     let myPage = 1;
     let myTotal = 0;
     let myPageSize = 10;
+    let currentUser = null;
+    let billingConfig = null;
 
     function logout() {
       localStorage.removeItem('token');
       localStorage.removeItem('is_admin');
       window.location.href = '/login';
+    }
+
+    async function initBilling() {
+      try {
+        const res = await fetch('/billing/config');
+        billingConfig = await res.json();
+        if (billingConfig.client_token) {
+          if (billingConfig.environment === 'sandbox') {
+            Paddle.Environment.set('sandbox');
+          }
+          Paddle.Setup({
+            token: billingConfig.client_token,
+            eventCallback: function (event) {
+              // The actual tier flip happens server-side when /billing/webhook
+              // receives the subscription event from Paddle — this just refreshes
+              // the UI a couple seconds after the customer finishes paying.
+              if (event.name === 'checkout.completed') {
+                setTimeout(() => { loadInfo(); }, 3000);
+              }
+            },
+          });
+        }
+      } catch (e) {
+        console.error('Could not load billing config', e);
+      }
+    }
+
+    function openUpgradeCheckout() {
+      if (!billingConfig || !billingConfig.price_id || !billingConfig.client_token) {
+        alert('Upgrades are not available yet — billing is not configured.');
+        return;
+      }
+      if (!currentUser) return;
+      Paddle.Checkout.open({
+        items: [{ priceId: billingConfig.price_id, quantity: 1 }],
+        customer: { email: currentUser.email },
+        customData: { user_id: String(currentUser.id) },
+        settings: { theme: 'light' },
+      });
     }
 
     function escapeHtml(s) {
@@ -1354,8 +1445,17 @@ ACCOUNT_HTML = """<!DOCTYPE html>
           throw new Error('Failed to load account info');
         }
         const u = await res.json();
+        currentUser = u;
 
         document.getElementById('user-email').textContent = u.email;
+
+        // Plan card
+        const isPremium = (u.tier === 'premium');
+        document.getElementById('plan-value').textContent = isPremium ? '⭐ Premium' : 'Free';
+        document.getElementById('plan-sub').textContent = isPremium
+          ? `${billingConfig ? billingConfig.premium_daily_limit : 50} scans/day`
+          : `${billingConfig ? billingConfig.free_daily_limit : 5} scans/day`;
+        document.getElementById('upgrade-btn').style.display = isPremium ? 'none' : 'inline-block';
 
         // Status pill
         const pill = document.getElementById('status-pill');
@@ -1447,7 +1547,7 @@ ACCOUNT_HTML = """<!DOCTYPE html>
       }
     }
 
-    loadInfo();
+    initBilling().then(loadInfo);
     loadMyScans();
   </script>
 </body>
@@ -1456,6 +1556,25 @@ ACCOUNT_HTML = """<!DOCTYPE html>
 
 def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
+
+
+def _ensure_daily_reset(user: User, db: Session) -> None:
+    """
+    Lazy daily reset: if usage_reset_date isn't today (UTC), zero usage_count first.
+    No background scheduler needed — this is checked on every scan request, so it
+    self-heals even after downtime/deploys instead of relying on a timer firing.
+    """
+    today = datetime.utcnow().date()
+    if user.usage_reset_date != today:
+        user.usage_count = 0
+        user.usage_reset_date = today
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+
+def _daily_limit_for_tier(tier: str) -> int:
+    return PREMIUM_DAILY_LIMIT if (tier or "free").strip().lower() == "premium" else FREE_DAILY_LIMIT
 
 
 @app.on_event("startup")
@@ -1512,7 +1631,37 @@ def startup():
                 conn.commit()
             except:
                 pass
-            
+
+            try:
+                conn.execute(text("ALTER TABLE users ADD COLUMN usage_reset_date DATE;"))
+                conn.commit()
+            except:
+                pass
+
+            try:
+                conn.execute(text("ALTER TABLE users ADD COLUMN tier VARCHAR(20) DEFAULT 'free';"))
+                conn.commit()
+            except:
+                pass
+
+            try:
+                conn.execute(text("ALTER TABLE users ADD COLUMN paddle_customer_id VARCHAR(255);"))
+                conn.commit()
+            except:
+                pass
+
+            try:
+                conn.execute(text("ALTER TABLE users ADD COLUMN paddle_subscription_id VARCHAR(255);"))
+                conn.commit()
+            except:
+                pass
+
+            try:
+                conn.execute(text("ALTER TABLE users ADD COLUMN subscription_status VARCHAR(30);"))
+                conn.commit()
+            except:
+                pass
+
             # Auto-grandfather: any existing users with NULL email_verified
             # (i.e., they registered before email verification existed) get marked as verified.
             # This prevents existing users from being locked out when SMTP is enabled later.
@@ -1602,8 +1751,10 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
     user = User(
         email=email,
         password_hash=hash_password(password),
-        usage_limit=DEFAULT_USAGE_LIMIT,
+        usage_limit=FREE_DAILY_LIMIT,
         usage_count=0,
+        usage_reset_date=datetime.utcnow().date(),
+        tier="free",
         is_banned=0,
     )
     db.add(user)
@@ -1756,25 +1907,126 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     return TokenResponse(access_token=token, user_id=user.id, is_admin=is_admin)
 
 
+# ============ BILLING (PADDLE) ============
+
+@app.get("/billing/config")
+def billing_config():
+    """Public config the frontend needs to open Paddle Checkout."""
+    return {
+        "client_token": PADDLE_CLIENT_TOKEN,
+        "price_id": PADDLE_PRICE_ID_PREMIUM,
+        "environment": PADDLE_ENV,
+        "free_daily_limit": FREE_DAILY_LIMIT,
+        "premium_daily_limit": PREMIUM_DAILY_LIMIT,
+    }
+
+
+def _verify_paddle_signature(raw_body: bytes, signature_header: str) -> bool:
+    """
+    Verify Paddle's Paddle-Signature header: 'ts=<unix_ts>;h1=<hex hmac-sha256>'
+    Signed payload is '<ts>:<raw_body>', HMAC'd with the webhook's notification secret.
+    """
+    if not PADDLE_WEBHOOK_SECRET or not signature_header:
+        return False
+    try:
+        parts = dict(p.split("=", 1) for p in signature_header.split(";") if "=" in p)
+        ts, h1 = parts.get("ts"), parts.get("h1")
+        if not ts or not h1:
+            return False
+        signed_payload = f"{ts}:".encode() + raw_body
+        expected = hmac.new(PADDLE_WEBHOOK_SECRET.encode(), signed_payload, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, h1)
+    except Exception:
+        return False
+
+
+@app.post("/billing/webhook")
+async def paddle_webhook(req: Request, db: Session = Depends(get_db)):
+    """
+    Handle Paddle subscription lifecycle events and flip the matching user's tier.
+    Users are matched via custom_data.user_id, set when checkout is opened
+    (see /account's 'Upgrade to Premium' button), with paddle_subscription_id /
+    paddle_customer_id as fallbacks for later events.
+    """
+    raw_body = await req.body()
+    signature = req.headers.get("Paddle-Signature", "")
+
+    if not _verify_paddle_signature(raw_body, signature):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    try:
+        payload = json.loads(raw_body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    event_type = payload.get("event_type", "")
+    data = payload.get("data", {}) or {}
+
+    if not event_type.startswith("subscription."):
+        return {"status": "ignored"}
+
+    custom_data = data.get("custom_data") or {}
+    user = None
+
+    raw_user_id = custom_data.get("user_id")
+    if raw_user_id:
+        try:
+            user = db.query(User).filter(User.id == int(raw_user_id)).first()
+        except (TypeError, ValueError):
+            user = None
+
+    if not user and data.get("id"):
+        user = db.query(User).filter(User.paddle_subscription_id == data.get("id")).first()
+
+    if not user and data.get("customer_id"):
+        user = db.query(User).filter(User.paddle_customer_id == data.get("customer_id")).first()
+
+    if not user:
+        # Ack anyway so Paddle doesn't retry forever on an event we can't map.
+        return {"status": "no_matching_user"}
+
+    status = (data.get("status") or "").strip().lower()
+    user.paddle_customer_id = data.get("customer_id") or user.paddle_customer_id
+    user.paddle_subscription_id = data.get("id") or user.paddle_subscription_id
+    user.subscription_status = status
+
+    if status in ("active", "trialing"):
+        user.tier = "premium"
+        user.usage_limit = PREMIUM_DAILY_LIMIT
+    elif status in ("canceled", "paused"):
+        user.tier = "free"
+        user.usage_limit = FREE_DAILY_LIMIT
+    # other statuses (e.g. past_due) keep the current tier — Paddle handles payment retry/dunning
+
+    db.add(user)
+    db.commit()
+
+    return {"status": "ok"}
+
+
 # ============ USER (SELF) ENDPOINTS — for the regular user dashboard ============
 
 @app.get("/user/me")
 def get_my_info(req: Request, db: Session = Depends(get_db)):
     """Return the logged-in user's own info (status, usage, email)"""
-    user_id = require_user(req)
+    user_id = require_user(req, db)
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
+    _ensure_daily_reset(user, db)
+
     owner_email = (settings.OWNER_EMAIL or "").strip().lower()
     is_admin = user.email.lower() == owner_email
-    
+
     return {
         "id": user.id,
         "email": user.email,
         "is_banned": getattr(user, 'is_banned', 0),
         "usage_count": getattr(user, 'usage_count', 0),
         "usage_limit": getattr(user, 'usage_limit', -1),
+        "tier": getattr(user, 'tier', 'free') or 'free',
+        "subscription_status": getattr(user, 'subscription_status', None),
         "is_admin": is_admin,
     }
 
@@ -1782,7 +2034,7 @@ def get_my_info(req: Request, db: Session = Depends(get_db)):
 @app.get("/user/scans")
 def get_my_scans(req: Request, page: int = 1, page_size: int = 10, db: Session = Depends(get_db)):
     """Return the logged-in user's own scan history (paginated)"""
-    user_id = require_user(req)
+    user_id = require_user(req, db)
     
     page = max(1, page)
     page_size = max(1, min(50, page_size))
@@ -1998,11 +2250,13 @@ async def scan_run(
     user = db.query(User).filter(User.id == user_id).first()
     if not user or getattr(user, 'is_banned', 0):
         raise HTTPException(status_code=403, detail="User banned")
-    
+
+    _ensure_daily_reset(user, db)
+
     usage_limit = getattr(user, 'usage_limit', -1)
     usage_count = getattr(user, 'usage_count', 0)
     if usage_limit >= 0 and usage_count >= usage_limit:
-        raise HTTPException(status_code=429, detail="Usage limit reached")
+        raise HTTPException(status_code=429, detail="Daily usage limit reached. Upgrade to Premium for more scans." if (user.tier or "free") == "free" else "Daily usage limit reached.")
     
     eye_mode = (eye_mode or "").strip().lower()
     if eye_mode not in ("left", "right", "both"):
@@ -2075,6 +2329,31 @@ async def scan_run(
         db.commit()
         db.refresh(scan)
         return JSONResponse(status_code=500, content={"id": scan.id, "eye_mode": scan.eye_mode, "status": scan.status, "error": "Scan failed"})
+
+
+@app.get("/scan/{scan_id}/report")
+def get_scan_report(scan_id: int, req: Request, db: Session = Depends(get_db)):
+    """Download a PDF report for a scan. Restricted to the scan's owner or the admin."""
+    user_id = require_user(req, db)
+    scan = db.query(Scan).filter(Scan.id == scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    if scan.user_id != user_id:
+        owner_email = (settings.OWNER_EMAIL or "").strip().lower()
+        requester = db.query(User).filter(User.id == user_id).first()
+        if not requester or requester.email.strip().lower() != owner_email:
+            raise HTTPException(status_code=403, detail="Not your scan")
+
+    parts = []
+    if scan.left_diagnosis:
+        parts.append(f"Left: {scan.left_diagnosis}")
+    if scan.right_diagnosis:
+        parts.append(f"Right: {scan.right_diagnosis}")
+    diagnosis_full = "; ".join(parts) or "No diagnosis recorded"
+
+    pdf_path = create_pdf_report(scan.id, diagnosis_full, scan.eye_mode)
+    return FileResponse(pdf_path, media_type="application/pdf", filename=f"alati_report_{scan.id}.pdf")
 
 
 @app.post("/scan/confirm")

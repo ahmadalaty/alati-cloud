@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, func, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, Date, Text, func, Boolean
 from .db import Base
 
 
@@ -8,11 +8,18 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
-    
+
     # User management fields
     is_banned = Column(Integer, default=0, nullable=False)  # 1=banned, 0=active
-    usage_limit = Column(Integer, default=-1, nullable=False)  # -1 = unlimited
-    usage_count = Column(Integer, default=0, nullable=False)  # current scans used
+    usage_limit = Column(Integer, default=-1, nullable=False)  # -1 = unlimited; daily cap for the user's current tier
+    usage_count = Column(Integer, default=0, nullable=False)  # scans used since usage_reset_date
+    usage_reset_date = Column(Date, nullable=True)  # UTC date usage_count last reset on (lazy daily reset)
+
+    # Billing / subscription (Paddle)
+    tier = Column(String(20), default="free", nullable=False)  # 'free' | 'premium'
+    paddle_customer_id = Column(String(255), nullable=True, index=True)
+    paddle_subscription_id = Column(String(255), nullable=True, index=True)
+    subscription_status = Column(String(30), nullable=True)  # active/canceled/paused/past_due etc.
 
 
 class APIToken(Base):

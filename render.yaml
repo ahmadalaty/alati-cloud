@@ -32,6 +32,24 @@ services:
       - key: MODEL_VARIANT
         value: resnet18
 
+      # Daily scan limits (free vs premium tier)
+      - key: FREE_DAILY_LIMIT
+        value: "5"
+      - key: PREMIUM_DAILY_LIMIT
+        value: "50"
+
+      # Paddle billing (set these in the Render dashboard — not committed)
+      - key: PADDLE_API_KEY
+        sync: false
+      - key: PADDLE_WEBHOOK_SECRET
+        sync: false
+      - key: PADDLE_CLIENT_TOKEN
+        sync: false
+      - key: PADDLE_PRICE_ID_PREMIUM
+        sync: false
+      - key: PADDLE_ENV
+        value: production
+
 databases:
   - name: alati-db
     plan: basic-256mb
