@@ -7,14 +7,7 @@ class Settings(BaseSettings):
     
     # JWT for login tokens
     JWT_SECRET: str
-    
-    # R2 Storage
-    R2_ENDPOINT: str
-    R2_ACCESS_KEY_ID: str
-    R2_SECRET_ACCESS_KEY: str
-    R2_BUCKET: str
-    STORAGE_MODE: str = "r2"
-    
+
     # Model
     MODEL_VARIANT: str = "resnet18"
     

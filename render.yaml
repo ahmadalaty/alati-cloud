@@ -14,20 +14,6 @@ services:
       - key: JWT_SECRET
         generateValue: true
 
-      # Force R2 only
-      - key: STORAGE_MODE
-        value: r2
-
-      # R2 env vars (set these in Render env too)
-      - key: R2_ENDPOINT
-        sync: false
-      - key: R2_ACCESS_KEY_ID
-        sync: false
-      - key: R2_SECRET_ACCESS_KEY
-        sync: false
-      - key: R2_BUCKET
-        sync: false
-
       # Model selection
       - key: MODEL_VARIANT
         value: resnet18
