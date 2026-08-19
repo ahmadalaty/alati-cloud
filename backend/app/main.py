@@ -955,8 +955,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="table-container">
       <div class="toolbar">
         <h3 style="font-size: 14px; font-weight: 600;">All Users</h3>
-        <div class="search-box">
-          <input type="text" id="users-search" placeholder="Search by email..." oninput="onUsersSearch()">
+        <div style="display: flex; gap: 10px; align-items: center;">
+          <div class="search-box">
+            <input type="text" id="users-search" placeholder="Search by email..." oninput="onUsersSearch()">
+          </div>
+          <button onclick="resetLegacyAccounts()" style="padding: 8px 14px; background: #f57c00; color: white; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;" title="Resets stale Free-tier limits and manually-granted Premium accounts with no real subscription back to the current Free default. Custom accounts and genuine paying Premium subscribers are left alone.">Reset Legacy Accounts</button>
         </div>
       </div>
       <div class="scroll-container">
@@ -1014,7 +1017,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     function onTierChange(id) {
       const tier = document.getElementById('tier-' + id).value;
+      if (tier === 'custom') return; // leave the limit field alone — admin sets it directly
       document.getElementById('limit-' + id).value = (tier === 'premium') ? planDefaults.premium : planDefaults.free;
+    }
+
+    async function resetLegacyAccounts() {
+      if (!confirm("Reset stale Free-tier usage limits and manually-granted Premium accounts (no real subscription) back to the current Free plan default?\n\nAccounts set to Custom, or with a genuine paying subscription, are left untouched.")) return;
+      const token = localStorage.getItem('token');
+      try {
+        const res = await fetch('/admin/users/reset-legacy-free', {
+          method: 'POST',
+          headers: {'Authorization': 'Bearer ' + token}
+        });
+        if (res.ok) {
+          const data = await res.json();
+          alert(`Reset ${data.reset_count} account(s) to Free.`);
+          loadUsers();
+        } else {
+          alert('Failed to reset accounts: ' + res.status);
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
     }
     
     function onScansSearch() {
@@ -1147,6 +1171,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const subStatus = u.subscription_status;
           const planBadge = tier === 'premium'
             ? `⭐ Premium${subStatus ? ` <span style="color:#888; font-weight:400;">(${escapeHtml(subStatus)})</span>` : ''}`
+            : tier === 'custom'
+            ? '🔧 Custom'
             : 'Free';
 
           return `
@@ -1156,8 +1182,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <td><input type="number" id="limit-${u.id}" value="${limit}" style="width: 70px;" title="Use -1 for unlimited"></td>
             <td>
               <select id="tier-${u.id}" style="padding: 6px; border-radius: 4px;" title="${planBadge}" onchange="onTierChange(${u.id})">
-                <option value="free" ${tier !== 'premium' ? 'selected' : ''}>Free</option>
+                <option value="free" ${tier === 'free' ? 'selected' : ''}>Free</option>
                 <option value="premium" ${tier === 'premium' ? 'selected' : ''}>⭐ Premium</option>
+                <option value="custom" ${tier === 'custom' ? 'selected' : ''}>🔧 Custom</option>
               </select>
             </td>
             <td>
@@ -1492,11 +1519,14 @@ ACCOUNT_HTML = """<!DOCTYPE html>
 
         // Plan card
         const isPremium = (u.tier === 'premium');
-        document.getElementById('plan-value').textContent = isPremium ? '⭐ Premium' : 'Free';
+        const isCustom = (u.tier === 'custom');
+        document.getElementById('plan-value').textContent = isPremium ? '⭐ Premium' : (isCustom ? '🔧 Custom' : 'Free');
         document.getElementById('plan-sub').textContent = isPremium
           ? `${billingConfig ? billingConfig.premium_daily_limit : 50} scans/day`
+          : isCustom
+          ? `${u.usage_limit === -1 ? 'Unlimited' : u.usage_limit} scans/day`
           : `${billingConfig ? billingConfig.free_daily_limit : 5} scans/day`;
-        document.getElementById('upgrade-btn').style.display = isPremium ? 'none' : 'inline-block';
+        document.getElementById('upgrade-btn').style.display = (isPremium || isCustom) ? 'none' : 'inline-block';
 
         // Status pill
         const pill = document.getElementById('status-pill');
@@ -2303,19 +2333,59 @@ def update_user(user_id: int, is_banned: int = None, usage_limit: int = None, ti
         user.is_banned = is_banned
     if tier is not None:
         tier = tier.strip().lower()
-        if tier not in ("free", "premium"):
-            raise HTTPException(status_code=400, detail="tier must be 'free' or 'premium'")
+        if tier not in ("free", "premium", "custom"):
+            raise HTTPException(status_code=400, detail="tier must be 'free', 'premium', or 'custom'")
         user.tier = tier
         # Manual admin override — no Paddle subscription behind it.
         user.subscription_status = None
         user.paddle_subscription_id = None
-        if usage_limit is None:
+        # 'custom' has no preset default — whatever usage_limit is given (or
+        # already set) is left as-is; free/premium snap to their plan default
+        # unless a usage_limit was explicitly provided alongside.
+        if usage_limit is None and tier != "custom":
             user.usage_limit = PREMIUM_DAILY_LIMIT if tier == "premium" else FREE_DAILY_LIMIT
     if usage_limit is not None:
         user.usage_limit = usage_limit
     db.add(user)
     db.commit()
     return {"status": "updated"}
+
+
+@app.post("/admin/users/reset-legacy-free")
+def reset_legacy_free_tier(req: Request, db: Session = Depends(get_db)):
+    """[ADMIN ONLY] Normalize old/inconsistent accounts to the current Free tier default.
+
+    Skips the owner/admin account, accounts set to 'custom' (an intentional
+    per-account override), and 'premium' accounts backed by a real Paddle
+    subscription. Everything else — free-tier accounts with a stale usage_limit
+    (e.g. leftover -1/unlimited from before tiers existed) and 'premium'
+    accounts with no real subscription behind them — is reset to Free.
+    """
+    require_admin(req)
+    owner_email = (settings.OWNER_EMAIL or "").strip().lower()
+
+    reset_count = 0
+    for user in db.query(User).filter(User.email != owner_email).all():
+        tier = (user.tier or "free").strip().lower()
+        if tier == "custom":
+            continue
+
+        has_real_subscription = bool(user.paddle_subscription_id) or (
+            (user.subscription_status or "").strip().lower() in ("active", "trialing")
+        )
+        if tier == "premium" and has_real_subscription:
+            continue
+
+        if user.tier != "free" or user.usage_limit != FREE_DAILY_LIMIT:
+            user.tier = "free"
+            user.usage_limit = FREE_DAILY_LIMIT
+            user.subscription_status = None
+            user.paddle_subscription_id = None
+            db.add(user)
+            reset_count += 1
+
+    db.commit()
+    return {"status": "ok", "reset_count": reset_count}
 
 
 @app.post("/admin/users/{user_id}/reset-usage")
