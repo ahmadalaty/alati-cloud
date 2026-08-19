@@ -60,8 +60,8 @@ PADDLE_CLIENT_TOKEN = os.getenv("PADDLE_CLIENT_TOKEN", "").strip()
 PADDLE_PRICE_ID_PREMIUM = os.getenv("PADDLE_PRICE_ID_PREMIUM", "").strip()
 PADDLE_ENV = os.getenv("PADDLE_ENV", "sandbox").strip().lower()  # 'sandbox' or 'production'
 
-# App URL (used in verification email links). Falls back to localhost if not set.
-APP_URL = os.getenv("APP_URL", "").rstrip("/") or "https://alati-cloud.onrender.com"
+# App URL (used in verification email links).
+APP_URL = os.getenv("APP_URL", "").rstrip("/") or "https://alati-api.onrender.com"
 
 # SMTP config (if not set, email verification is disabled — registration still works)
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()

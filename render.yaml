@@ -14,6 +14,11 @@ services:
       - key: JWT_SECRET
         generateValue: true
 
+      # Public URL of this service — used to build links in emails (e.g.
+      # email verification). Must match the actual live domain below.
+      - key: APP_URL
+        value: https://alati-api.onrender.com
+
       # Model selection
       - key: MODEL_VARIANT
         value: resnet18
