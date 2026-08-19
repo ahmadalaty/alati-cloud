@@ -1241,7 +1241,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     
     async function resetUsage(id) {
-      if (!confirm('Reset this user\\'s usage count to 0?')) return;
+      if (!confirm("Reset this user's usage count to 0?")) return;
       const token = localStorage.getItem('token');
       try {
         const res = await fetch(`/admin/users/${id}/reset-usage`, {
