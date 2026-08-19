@@ -1022,7 +1022,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     async function resetLegacyAccounts() {
-      if (!confirm("Reset stale Free-tier usage limits and manually-granted Premium accounts (no real subscription) back to the current Free plan default?\n\nAccounts set to Custom, or with a genuine paying subscription, are left untouched.")) return;
+      if (!confirm("Reset stale Free-tier usage limits and manually-granted Premium accounts (no real subscription) back to the current Free plan default?\\n\\nAccounts set to Custom, or with a genuine paying subscription, are left untouched.")) return;
       const token = localStorage.getItem('token');
       try {
         const res = await fetch('/admin/users/reset-legacy-free', {
