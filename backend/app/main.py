@@ -36,7 +36,6 @@ from .auth import (
     verify_api_token,
     _extract_token,
 )
-from .storage_r2 import new_upload_id, key_for, put_bytes, BUILD_MARKER as STORAGE_MARKER
 from .inference import (
     predict_diagnosis,
     predict_debug,
@@ -184,6 +183,12 @@ LOGIN_HTML = """<!DOCTYPE html>
     .consent-row { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 1.5rem; font-size: 13px; color: #2c2c2a; }
     .consent-row input[type="checkbox"] { width: 18px; height: 18px; flex-shrink: 0; margin-top: 1px; cursor: pointer; accent-color: #185fa5; }
     .consent-row label { cursor: pointer; }
+
+    /* Legal footer */
+    .legal-footer { position: fixed; left: 0; right: 0; bottom: 0; padding: 14px; text-align: center; font-size: 12px; }
+    .legal-footer a { color: rgba(255,255,255,0.85); text-decoration: none; margin: 0 8px; }
+    .legal-footer a:hover { text-decoration: underline; color: white; }
+    .legal-footer span { color: rgba(255,255,255,0.4); }
     
     /* Banned account banner */
     .banned-banner { display: none; background: #ffebee; border-left: 4px solid #c62828; border-radius: 6px; padding: 14px 16px; margin-bottom: 1.5rem; }
@@ -326,6 +331,12 @@ LOGIN_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="legal-footer">
+    <a href="/legal/terms">Terms of Service</a><span>·</span>
+    <a href="/legal/privacy">Privacy Notice</a><span>·</span>
+    <a href="/legal/refund-policy">Refund Policy</a>
+  </div>
+
   <script>
     function switchTab(tab) {
       document.querySelectorAll('.form-section').forEach(el => el.classList.remove('active'));
@@ -435,7 +446,6 @@ LOGIN_HTML = """<!DOCTYPE html>
             switchTab('login');
             document.getElementById('success-text').textContent = data.message || 'Please check your email to verify your account.';
             document.getElementById('success-banner').classList.add('active');
-            document.getElementById('login-email').value = email;
             lastEmailForResend = email;
           } else if (data.access_token) {
             // Direct login (email verification not enabled)
@@ -956,12 +966,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <th>Email</th>
               <th>Usage</th>
               <th>Limit</th>
+              <th>Plan</th>
               <th>Status</th>
               <th>Action</th>
             </tr>
           </thead>
           <tbody id="users-tbody">
-            <tr><td colspan="5" style="text-align: center; color: #888;">Loading users...</td></tr>
+            <tr><td colspan="6" style="text-align: center; color: #888;">Loading users...</td></tr>
           </tbody>
         </table>
       </div>
@@ -990,6 +1001,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let scansPage = 1, scansQuery = '', scansTotal = 0, scansPageSize = 10;
     let usersPage = 1, usersQuery = '', usersTotal = 0, usersPageSize = 10;
     let scansSearchTimer = null, usersSearchTimer = null;
+    let planDefaults = { free: 5, premium: 50 };
+
+    async function loadPlanDefaults() {
+      try {
+        const res = await fetch('/billing/config');
+        const cfg = await res.json();
+        if (cfg.free_daily_limit != null) planDefaults.free = cfg.free_daily_limit;
+        if (cfg.premium_daily_limit != null) planDefaults.premium = cfg.premium_daily_limit;
+      } catch (e) {}
+    }
+
+    function onTierChange(id) {
+      const tier = document.getElementById('tier-' + id).value;
+      document.getElementById('limit-' + id).value = (tier === 'premium') ? planDefaults.premium : planDefaults.free;
+    }
     
     function onScansSearch() {
       clearTimeout(scansSearchTimer);
@@ -1085,7 +1111,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         });
         
         if (!res.ok) {
-          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #c62828;">Failed to load users (' + res.status + ')</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #c62828;">Failed to load users (' + res.status + ')</td></tr>';
           info.textContent = '';
           return;
         }
@@ -1105,7 +1131,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         document.getElementById('users-next').disabled = (usersPage >= maxPage);
         
         if (users.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">' + (usersQuery ? 'No users match your search' : 'No users yet') + '</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #888;">' + (usersQuery ? 'No users match your search' : 'No users yet') + '</td></tr>';
           return;
         }
         
@@ -1117,11 +1143,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const overLimit = (limit >= 0 && used >= limit);
           const usageColor = overLimit ? '#c62828' : (nearLimit ? '#ef6c00' : '#2e7d32');
           
+          const tier = (u.tier || 'free').toLowerCase();
+          const subStatus = u.subscription_status;
+          const planBadge = tier === 'premium'
+            ? `⭐ Premium${subStatus ? ` <span style="color:#888; font-weight:400;">(${escapeHtml(subStatus)})</span>` : ''}`
+            : 'Free';
+
           return `
           <tr id="user-row-${u.id}">
             <td class="user-email">${escapeHtml(u.email)}</td>
             <td style="font-weight: 600; color: ${usageColor};">${used} / ${limitDisplay}</td>
             <td><input type="number" id="limit-${u.id}" value="${limit}" style="width: 70px;" title="Use -1 for unlimited"></td>
+            <td>
+              <select id="tier-${u.id}" style="padding: 6px; border-radius: 4px;" title="${planBadge}" onchange="onTierChange(${u.id})">
+                <option value="free" ${tier !== 'premium' ? 'selected' : ''}>Free</option>
+                <option value="premium" ${tier === 'premium' ? 'selected' : ''}>⭐ Premium</option>
+              </select>
+            </td>
             <td>
               <select id="banned-${u.id}" style="padding: 6px; border-radius: 4px;">
                 <option value="0" ${!u.is_banned ? 'selected' : ''}>Active</option>
@@ -1136,10 +1174,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           `;
         }).join('');
       } catch (e) {
-        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #c62828;">Error: ' + escapeHtml(e.message) + '</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #c62828;">Error: ' + escapeHtml(e.message) + '</td></tr>';
       }
     }
-    
+
     function escapeHtml(s) {
       if (s == null) return '';
       return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1149,9 +1187,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const token = localStorage.getItem('token');
       const newLimit = parseInt(document.getElementById('limit-' + id).value);
       const newBanned = parseInt(document.getElementById('banned-' + id).value);
-      
+      const newTier = document.getElementById('tier-' + id).value;
+
       try {
-        const res = await fetch(`/admin/users/${id}?usage_limit=${newLimit}&is_banned=${newBanned}`, {
+        const params = new URLSearchParams({ usage_limit: newLimit, is_banned: newBanned, tier: newTier });
+        const res = await fetch(`/admin/users/${id}?` + params.toString(), {
           method: 'PATCH',
           headers: {'Authorization': 'Bearer ' + token}
         });
@@ -1191,6 +1231,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
     
+    loadPlanDefaults();
     loadScans();
     loadUsers();
   </script>
@@ -1734,7 +1775,6 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
         return {
             "status": "verification_sent",
             "message": "Please check your email to verify your account before logging in.",
-            "email": email,
         }
     
     # Email verification disabled — return token immediately (backward compatible)
@@ -1819,6 +1859,168 @@ def _verification_result_page(success: bool, message: str) -> str:
     <a href="/login">Go to Login</a>
   </div>
 </body></html>"""
+
+
+LEGAL_LAST_UPDATED = "August 19, 2026"
+LEGAL_CONTACT_EMAIL = "ahmadalaty@gmail.com"
+
+
+def _legal_page_html(title: str, body_html: str) -> str:
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alati - {title}</title>
+<style>
+  * {{ box-sizing: border-box; }}
+  body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f8f7f3; margin: 0; padding: 2rem 1rem; }}
+  .card {{ max-width: 720px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); overflow: hidden; }}
+  .header {{ background: linear-gradient(135deg, #185fa5 0%, #0f6e56 100%); padding: 2rem; color: white; }}
+  .header h1 {{ margin: 0 0 4px; font-size: 26px; font-weight: 500; }}
+  .header p {{ margin: 0; opacity: 0.9; font-size: 13px; }}
+  .content {{ padding: 2rem; color: #2c2c2a; line-height: 1.7; font-size: 15px; }}
+  .content h2 {{ font-size: 17px; color: #185fa5; margin: 1.75rem 0 0.5rem; }}
+  .content h2:first-child {{ margin-top: 0; }}
+  .content p, .content li {{ color: #444441; }}
+  .content ul {{ padding-left: 1.25rem; }}
+  .footer-nav {{ padding: 1.5rem 2rem; border-top: 1px solid #e0e0e0; font-size: 13px; display: flex; gap: 1.5rem; flex-wrap: wrap; }}
+  .footer-nav a {{ color: #185fa5; text-decoration: none; font-weight: 600; }}
+  .footer-nav a:hover {{ text-decoration: underline; }}
+</style></head>
+<body>
+  <div class="card">
+    <div class="header">
+      <h1>{title}</h1>
+      <p>Alati · AI-powered retinal disease detection · Last updated {LEGAL_LAST_UPDATED}</p>
+    </div>
+    <div class="content">
+      {body_html}
+    </div>
+    <div class="footer-nav">
+      <a href="/legal/terms">Terms of Service</a>
+      <a href="/legal/privacy">Privacy Notice</a>
+      <a href="/legal/refund-policy">Refund Policy</a>
+      <a href="/login">← Back to Alati</a>
+    </div>
+  </div>
+</body></html>"""
+
+
+TERMS_OF_SERVICE_HTML = _legal_page_html("Terms of Service", f"""
+  <p>These Terms of Service ("Terms") govern your access to and use of Alati (the "Service"), an AI-based screening aid for diabetic retinopathy. By creating an account or using the Service, you agree to these Terms.</p>
+
+  <h2>1. Eligibility</h2>
+  <p>The Service is intended solely for use by licensed medical professionals acting within their own clinical judgment and scope of practice. By registering, you confirm that you are a licensed medical professional and that you are using the Service accordingly.</p>
+
+  <h2>2. Description of the Service</h2>
+  <p>Alati is currently in a pre-approval / research-use stage and has not received regulatory clearance (e.g., FDA, CE, or local Ministry of Health approval) in any jurisdiction. The Service is a supportive aid only — it does not diagnose, and its output must not be used as the sole basis for any clinical decision. All findings must be independently verified by the treating physician. See the disclaimer shown at sign-up for full detail; it is incorporated into these Terms by reference.</p>
+
+  <h2>3. Your Account</h2>
+  <p>You are responsible for maintaining the confidentiality of your account credentials and for all activity under your account. Notify us promptly of any unauthorized use.</p>
+
+  <h2>4. Subscription Plans &amp; Billing</h2>
+  <p>Alati offers a free tier with a limited number of scans per day, and a paid Premium subscription (currently $29.99/month) offering a higher daily scan limit. Premium subscriptions are billed on a recurring monthly basis through our payment processor, Paddle, until cancelled. See our <a href="/legal/refund-policy">Refund Policy</a> for cancellation and refund terms.</p>
+
+  <h2>5. Acceptable Use</h2>
+  <p>You agree not to misuse the Service, including by attempting to circumvent usage limits, uploading content you do not have the right to submit, or using the Service in a manner inconsistent with the eligibility and clinical-use restrictions above.</p>
+
+  <h2>6. Intellectual Property</h2>
+  <p>The Service, including its underlying software and models, is owned by Alati and its licensors. These Terms do not grant you any rights to our intellectual property beyond the limited right to use the Service as intended.</p>
+
+  <h2>7. Disclaimer of Warranties</h2>
+  <p>The Service is provided "as is" and "as available," without warranties of any kind, express or implied, including as to accuracy, reliability, or fitness for a particular purpose — consistent with its current pre-approval / research-use status.</p>
+
+  <h2>8. Limitation of Liability</h2>
+  <p>To the maximum extent permitted by law, Alati shall not be liable for any indirect, incidental, or consequential damages, or for any clinical decisions made using the Service's output. By using the Service, you accept full responsibility for clinical decisions made in your practice, as set out in the sign-up disclaimer.</p>
+
+  <h2>9. Termination</h2>
+  <p>We may suspend or terminate your account for violation of these Terms. You may stop using the Service and cancel your subscription at any time.</p>
+
+  <h2>10. Changes to These Terms</h2>
+  <p>We may update these Terms from time to time. Continued use of the Service after changes take effect constitutes acceptance of the revised Terms.</p>
+
+  <h2>11. Contact Us</h2>
+  <p>Questions about these Terms can be sent to <a href="mailto:{LEGAL_CONTACT_EMAIL}">{LEGAL_CONTACT_EMAIL}</a>.</p>
+""")
+
+
+PRIVACY_NOTICE_HTML = _legal_page_html("Privacy Notice", f"""
+  <p>This Privacy Notice explains what information Alati collects, how it is used, and the choices you have.</p>
+
+  <h2>1. Information We Collect</h2>
+  <ul>
+    <li><strong>Account information:</strong> email address and password (stored as a salted hash, never in plain text).</li>
+    <li><strong>Scan results:</strong> the AI-generated diagnosis text for each scan, associated with your account.</li>
+    <li><strong>Usage data:</strong> scan counts, timestamps, and subscription/billing status.</li>
+  </ul>
+  <p><strong>We do not store your retinal images.</strong> Uploaded images are held in memory only for the seconds it takes to run the AI screening, and are discarded immediately afterward — they are never written to disk or cloud storage, and are never used to train or fine-tune our AI models.</p>
+
+  <h2>2. How We Use Your Information</h2>
+  <p>We use this information to provide and improve the Service, enforce usage limits for your plan, process subscription billing, send account-related emails (such as email verification), and provide support.</p>
+
+  <h2>3. Data Storage &amp; Security</h2>
+  <p>Account records and scan diagnosis text are stored in an encrypted-at-rest database. As noted above, the retinal images themselves are never persisted. Access to stored data is restricted to what is needed to operate the Service.</p>
+
+  <h2>4. Third-Party Service Providers</h2>
+  <p>We share the minimum necessary information with the following processors to operate the Service:</p>
+  <ul>
+    <li><strong>Paddle</strong> — payment processing and subscription billing for Premium accounts (Paddle acts as merchant of record for these transactions).</li>
+    <li><strong>Our email provider</strong> — delivery of account verification and transactional emails.</li>
+  </ul>
+  <p>We do not sell your personal information.</p>
+
+  <h2>5. Data Retention</h2>
+  <p>We retain account and scan data for as long as your account is active, or as needed to comply with legal obligations. You may request deletion of your account and associated data at any time (see below).</p>
+
+  <h2>6. Your Rights</h2>
+  <p>You may request access to, correction of, or deletion of your personal data by contacting us at the address below. We will respond within a reasonable time.</p>
+
+  <h2>7. Local Storage</h2>
+  <p>The Service uses your browser's local storage to keep you signed in (an authentication token) — no third-party tracking or advertising cookies are used.</p>
+
+  <h2>8. Changes to This Notice</h2>
+  <p>We may update this Privacy Notice from time to time; the "Last updated" date above will reflect the most recent revision.</p>
+
+  <h2>9. Contact Us</h2>
+  <p>Questions or requests regarding your data can be sent to <a href="mailto:{LEGAL_CONTACT_EMAIL}">{LEGAL_CONTACT_EMAIL}</a>.</p>
+""")
+
+
+REFUND_POLICY_HTML = _legal_page_html("Refund Policy", f"""
+  <p>This Refund Policy applies to paid Premium subscriptions to Alati, billed via Paddle.</p>
+
+  <h2>1. Free Plan</h2>
+  <p>The free plan is provided at no cost, with a limited number of scans per day. No payment, no refund applicable.</p>
+
+  <h2>2. Premium Subscription</h2>
+  <p>The Premium plan is billed at $29.99 per month on a recurring basis, starting on the date you subscribe, until cancelled.</p>
+
+  <h2>3. Cancellations</h2>
+  <p>You may cancel your Premium subscription at any time from your account page. Cancelling stops future renewals; you'll keep Premium access through the end of the billing period you already paid for.</p>
+
+  <h2>4. Refunds</h2>
+  <p>If you're not satisfied, you may request a full refund within 7 days of a Premium charge, provided you have used fewer than 10 scans during the billing period being refunded. Contact us at the email below to request one. Refund requests outside this window, or above the usage threshold, are considered on a case-by-case basis. Approved refunds are processed back to your original payment method via Paddle.</p>
+
+  <h2>5. How to Request a Refund</h2>
+  <p>Email <a href="mailto:{LEGAL_CONTACT_EMAIL}">{LEGAL_CONTACT_EMAIL}</a> with your account email and the date of the charge you'd like refunded.</p>
+
+  <h2>6. Contact Us</h2>
+  <p>For any billing questions, reach us at <a href="mailto:{LEGAL_CONTACT_EMAIL}">{LEGAL_CONTACT_EMAIL}</a>.</p>
+""")
+
+
+@app.get("/legal/terms", response_class=HTMLResponse)
+async def legal_terms():
+    return TERMS_OF_SERVICE_HTML
+
+
+@app.get("/legal/privacy", response_class=HTMLResponse)
+async def legal_privacy():
+    return PRIVACY_NOTICE_HTML
+
+
+@app.get("/legal/refund-policy", response_class=HTMLResponse)
+async def legal_refund_policy():
+    return REFUND_POLICY_HTML
 
 
 @app.post("/auth/login", response_model=TokenResponse)
@@ -2040,6 +2242,8 @@ def list_users(req: Request, q: str = "", page: int = 1, page_size: int = 10, db
                 "is_banned": getattr(u, 'is_banned', 0),
                 "usage_limit": getattr(u, 'usage_limit', -1),
                 "usage_count": getattr(u, 'usage_count', 0),
+                "tier": getattr(u, 'tier', 'free') or 'free',
+                "subscription_status": getattr(u, 'subscription_status', None),
             }
             for u in users
         ],
@@ -2089,7 +2293,7 @@ def list_scans(req: Request, q: str = "", page: int = 1, page_size: int = 10, db
 
 
 @app.patch("/admin/users/{user_id}")
-def update_user(user_id: int, is_banned: int = None, usage_limit: int = None, req: Request = None, db: Session = Depends(get_db)):
+def update_user(user_id: int, is_banned: int = None, usage_limit: int = None, tier: str = None, req: Request = None, db: Session = Depends(get_db)):
     """[ADMIN ONLY] Update user"""
     require_admin(req)
     user = db.query(User).filter(User.id == user_id).first()
@@ -2097,6 +2301,16 @@ def update_user(user_id: int, is_banned: int = None, usage_limit: int = None, re
         raise HTTPException(status_code=404, detail="User not found")
     if is_banned is not None:
         user.is_banned = is_banned
+    if tier is not None:
+        tier = tier.strip().lower()
+        if tier not in ("free", "premium"):
+            raise HTTPException(status_code=400, detail="tier must be 'free' or 'premium'")
+        user.tier = tier
+        # Manual admin override — no Paddle subscription behind it.
+        user.subscription_status = None
+        user.paddle_subscription_id = None
+        if usage_limit is None:
+            user.usage_limit = PREMIUM_DAILY_LIMIT if tier == "premium" else FREE_DAILY_LIMIT
     if usage_limit is not None:
         user.usage_limit = usage_limit
     db.add(user)
@@ -2217,23 +2431,17 @@ async def scan_run(
             
             left_bytes = await left_file.read()
             right_bytes = await right_file.read()
-            
-            left_key = key_for("left", new_upload_id())
-            right_key = key_for("right", new_upload_id())
-            
-            put_bytes(left_key, left_bytes, left_file.content_type or "image/jpeg")
-            put_bytes(right_key, right_bytes, right_file.content_type or "image/jpeg")
-            
+
+            # Images are only held in memory for inference and are never
+            # persisted anywhere — only the resulting diagnosis is saved.
             left_diag = predict_debug(left_bytes, enhance=enhance_flag).get("translated") or "Uncertain"
             right_diag = predict_debug(right_bytes, enhance=enhance_flag).get("translated") or "Uncertain"
-            
+
             scan = Scan(
-                user_id=user_id, 
-                eye_mode="both", 
-                left_key=left_key, 
-                right_key=right_key,
-                left_diagnosis=left_diag, 
-                right_diagnosis=right_diag, 
+                user_id=user_id,
+                eye_mode="both",
+                left_diagnosis=left_diag,
+                right_diagnosis=right_diag,
                 status="done",
                 error=None
             )
@@ -2249,15 +2457,13 @@ async def scan_run(
             raise HTTPException(400, detail="File required")
         
         image_bytes = await file.read()
-        r2_key = key_for(eye_mode, new_upload_id())
-        put_bytes(r2_key, image_bytes, file.content_type or "image/jpeg")
-        
+
+        # Image is only held in memory for inference and is never persisted
+        # anywhere — only the resulting diagnosis is saved.
         diag = predict_debug(image_bytes, enhance=enhance_flag).get("translated") or "Uncertain"
-        
+
         scan = Scan(
             user_id=user_id, eye_mode=eye_mode, status="done",
-            left_key=r2_key if eye_mode == "left" else None,
-            right_key=r2_key if eye_mode == "right" else None,
             left_diagnosis=diag if eye_mode == "left" else None,
             right_diagnosis=diag if eye_mode == "right" else None,
         )
