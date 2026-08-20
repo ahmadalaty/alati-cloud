@@ -130,15 +130,15 @@ def enhance_retinal_image(image_bytes: bytes) -> bytes:
 
 def _polish_name(name: str) -> str:
     if not name:
-        return "Uncertain"
+        return "Other"
     name = name.replace("_", " ").replace("-", " ").strip()
     name = " ".join(w.capitalize() for w in name.split())
-    return name or "Uncertain"
+    return name or "Other"
 
 
 def translate_code(code: str) -> str:
     if not code:
-        return "Uncertain"
+        return "Other"
     return _polish_name(CODE_TO_NAME.get(code, code))
 
 
@@ -339,7 +339,7 @@ def predict_raw(image_bytes: bytes, enhance: bool = False) -> dict:
     top3 = sorted(probs.items(), key=lambda kv: kv[1], reverse=True)[:3]
 
     final_code, reason = choose_final_code(probs)
-    translated = translate_code(final_code) if final_code != "UNCERTAIN" else "Uncertain"
+    translated = translate_code(final_code) if final_code != "UNCERTAIN" else "Other"
 
     # ============ PHASE 1: Return only DR and Normal probabilities ============
     if ACTIVE_PHASE == 1:

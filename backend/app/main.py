@@ -2504,8 +2504,8 @@ async def scan_run(
 
             # Images are only held in memory for inference and are never
             # persisted anywhere — only the resulting diagnosis is saved.
-            left_diag = predict_debug(left_bytes, enhance=enhance_flag).get("translated") or "Uncertain"
-            right_diag = predict_debug(right_bytes, enhance=enhance_flag).get("translated") or "Uncertain"
+            left_diag = predict_debug(left_bytes, enhance=enhance_flag).get("translated") or "Other"
+            right_diag = predict_debug(right_bytes, enhance=enhance_flag).get("translated") or "Other"
 
             scan = Scan(
                 user_id=user_id,
@@ -2530,7 +2530,7 @@ async def scan_run(
 
         # Image is only held in memory for inference and is never persisted
         # anywhere — only the resulting diagnosis is saved.
-        diag = predict_debug(image_bytes, enhance=enhance_flag).get("translated") or "Uncertain"
+        diag = predict_debug(image_bytes, enhance=enhance_flag).get("translated") or "Other"
 
         scan = Scan(
             user_id=user_id, eye_mode=eye_mode, status="done",
