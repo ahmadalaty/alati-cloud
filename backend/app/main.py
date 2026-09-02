@@ -1762,7 +1762,16 @@ _ECG_PAGE = os.path.join(os.path.dirname(__file__), "static", "ecg.html")
 async def ecg_page():
     if not os.path.exists(_ECG_PAGE):
         raise HTTPException(status_code=404, detail="ECG page not deployed")
-    return FileResponse(_ECG_PAGE, media_type="text/html")
+    # FileResponse sends ETag/Last-Modified but no Cache-Control, which lets the
+    # browser apply heuristic freshness and serve a stale copy for hours without
+    # ever revalidating - so a deployed fix to this page never reaches the user.
+    # "no-cache" means revalidate every time, not "don't store": the ETag still
+    # turns the usual case into a cheap 304.
+    return FileResponse(
+        _ECG_PAGE,
+        media_type="text/html",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
 
 
 # ============ AUTH ENDPOINTS ============
