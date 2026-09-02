@@ -609,6 +609,7 @@ SCAN_HTML = """<!DOCTYPE html>
       <div class="header-btns">
         <button class="header-btn" id="admin-btn" style="display: none;" onclick="goToDashboard()">📊 Admin Dashboard</button>
         <a class="header-btn" href="/account" style="text-decoration: none;">👤 My Account</a>
+        <a class="header-btn" href="/ecg" target="_blank" rel="noopener" style="text-decoration:none;" title="Opens the ECG reader in a new tab — separate from the retinal pipeline">🫀 Test ECG</a>
         <button class="header-btn" onclick="logout()">Logout</button>
       </div>
     </div>
@@ -898,6 +899,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
       <div class="header-btns">
         <button class="header-btn" onclick="goToScan()">🔍 Use AI Scanner</button>
+        <a class="header-btn" href="/ecg" target="_blank" rel="noopener" style="text-decoration:none;" title="Opens the ECG reader in a new tab — separate from the retinal pipeline">🫀 Test ECG</a>
         <button class="header-btn" onclick="logout()">Logout</button>
       </div>
     </div>
@@ -1379,6 +1381,7 @@ ACCOUNT_HTML = """<!DOCTYPE html>
       </div>
       <div class="header-btns">
         <a class="header-btn" id="scan-btn" href="/scan">🔍 New Scan</a>
+        <a class="header-btn" href="/ecg" target="_blank" rel="noopener" style="text-decoration:none;" title="Opens the ECG reader in a new tab — separate from the retinal pipeline">🫀 Test ECG</a>
         <button class="header-btn" onclick="logout()">Logout</button>
       </div>
     </div>
@@ -1746,6 +1749,20 @@ async def dashboard_page():
 @app.get("/account", response_class=HTMLResponse)
 async def account_page():
     return ACCOUNT_HTML
+
+
+# ---- ECG reader (trial) -------------------------------------------------
+# Self-contained static page: it does its own image processing in the browser
+# and never calls this API, so it needs no auth, no DB and no new dependency.
+# Kept entirely separate from the retinal pipeline.
+_ECG_PAGE = os.path.join(os.path.dirname(__file__), "static", "ecg.html")
+
+
+@app.get("/ecg")
+async def ecg_page():
+    if not os.path.exists(_ECG_PAGE):
+        raise HTTPException(status_code=404, detail="ECG page not deployed")
+    return FileResponse(_ECG_PAGE, media_type="text/html")
 
 
 # ============ AUTH ENDPOINTS ============
