@@ -151,6 +151,9 @@ details.acc[open]>summary::after{transform:rotate(-135deg) translateY(-2px)}
 .viewport{position:relative;background:var(--surface-3);border:1px solid var(--line);border-radius:var(--radius-sm);overflow:hidden;height:340px;touch-action:none;cursor:crosshair}
 .viewport.empty{display:grid;place-items:center;cursor:default}
 .viewport canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+/* while empty the canvases are blank but still cover the panel — keep them from
+   swallowing clicks meant for the drop target and its "Choose photo" button */
+.viewport.empty canvas{pointer-events:none}
 .vp-drop{text-align:center;padding:22px;max-width:420px}
 .vp-drop .ic{width:38px;height:38px;margin:0 auto 10px;border-radius:8px;background:var(--accent-lo);display:grid;place-items:center;color:var(--accent)}
 .vp-drop h3{font-size:13.5px;margin-bottom:4px}
@@ -334,7 +337,7 @@ dialog.sheet::backdrop{background:rgba(8,14,16,.55)}
 .shot{position:relative;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--surface)}
 .shot .viewport{height:min(48vh,400px);border:0;border-radius:0;background:var(--surface-2)}
 .shot.empty .viewport{background:var(--surface)}
-.drop-lg{display:grid;place-items:center;text-align:center;padding:44px 22px;cursor:pointer}
+.drop-lg{display:grid;place-items:center;text-align:center;padding:44px 22px;cursor:pointer;position:relative;z-index:1}
 .drop-lg .ic{width:46px;height:46px;border-radius:12px;background:var(--accent-lo);color:var(--accent);
   display:grid;place-items:center;margin-bottom:14px}
 .drop-lg h2{font-size:16.5px;letter-spacing:-.015em;margin-bottom:5px}
