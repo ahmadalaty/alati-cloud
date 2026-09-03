@@ -69,20 +69,6 @@ DISEASE_BLOCK_THRESH = float(os.getenv("DISEASE_BLOCK", "0.35"))   # Any disease
 DISEASE_MIN_THRESH = float(os.getenv("DISEASE_MIN", "0.50"))       # Disease must be >= this to output disease
 MIRROR_TTA = str(os.getenv("MIRROR_TTA", "1")).strip() == "1"       # mirror augmentation on/off
 
-# ============ TILED INFERENCE ============
-# The model sees 224x224. A fundus photo is commonly 3000px+ across, so a whole-
-# image resize throws microaneurysms away before the first convolution. Scoring
-# overlapping tiles and keeping the most suspicious one preserves them.
-#
-# Measured on HRF (45 images, independent of the ODIR data this model trained on):
-#   whole image   8/15 sensitivity, 15/15 specificity, AUC 0.956
-#   3x3 tiling   14/15 sensitivity, 15/15 specificity, AUC 1.000
-#
-# Cost is real: TILE_GRID=3 at 50% overlap is 25 tiles, so 50 forward passes with
-# mirror TTA, batched into one call. Set TILE_GRID=0 to restore whole-image only.
-TILE_GRID = int(os.getenv("TILE_GRID", "3"))
-TILE_OVERLAP = 0.5
-
 
 def _sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
@@ -261,86 +247,11 @@ def _mirror_bytes(image_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 
-def _probs_from_images(imgs) -> list:
-    """
-    Score a list of PIL images in ONE batched forward pass.
-
-    Batching matters on the CPU boxes this deploys to: 50 sequential passes and
-    one 50-image batch do the same arithmetic, but the batch keeps the matrix
-    multiplies large enough for BLAS to stay efficient.
-    """
-    if not imgs:
-        return []
-    x = torch.stack([TRANSFORM(im) for im in imgs])  # [N,3,224,224]
-    with torch.no_grad():
-        out = MODEL(x, x).detach().cpu().tolist()    # sigmoid already applied
-    res = []
-    for row in out:
-        d = {}
-        for i in range(min(len(row), len(ALL_LABELS))):
-            d[ALL_LABELS[i]] = float(row[i])
-        res.append(d)
-    return res
-
-
-def _tile_images(img, grid: int):
-    """Overlapping tiles covering the frame; falls back to the whole image."""
-    W, H = img.size
-    tw, th = W // grid, H // grid
-    if tw < 32 or th < 32:
-        return [img]
-    step_x = max(1, int(tw * TILE_OVERLAP))
-    step_y = max(1, int(th * TILE_OVERLAP))
-    tiles = []
-    y = 0
-    while y + th <= H:
-        x = 0
-        while x + tw <= W:
-            tiles.append(img.crop((x, y, x + tw, y + th)))
-            x += step_x
-        y += step_y
-    return tiles or [img]
-
-
-def _disease_score(p: Dict[str, float]) -> float:
-    """How suspicious a view is, using only labels the active phase reports."""
-    codes = [c for c in ACTIVE_LABELS if c != "N"]
-    return max((float(p.get(c, 0.0)) for c in codes), default=0.0)
-
-
-def _probs_tiled(image_bytes: bytes) -> Dict[str, float]:
-    """
-    Score every tile and return the probability vector of the most suspicious one.
-
-    Taking the max per label independently would be wrong: N and D would then come
-    from different tiles and could both end up high, which choose_final_code has
-    no sensible reading of. Returning one tile's whole vector keeps the labels
-    mutually consistent.
-    """
-    img = Image.open(BytesIO(image_bytes)).convert("RGB")
-    views = _tile_images(img, TILE_GRID)
-    if MIRROR_TTA:
-        batch = []
-        for t in views:
-            batch.append(t)
-            batch.append(t.transpose(Image.FLIP_LEFT_RIGHT))
-        scored = _probs_from_images(batch)
-        merged = [_avg_probs(scored[i], scored[i + 1]) for i in range(0, len(scored), 2)]
-    else:
-        merged = _probs_from_images(views)
-    if not merged:
-        return _probs_from_bytes_single(image_bytes)
-    return max(merged, key=_disease_score)
-
-
 def probs_from_bytes(image_bytes: bytes) -> Dict[str, float]:
     """
     Returns probabilities with optional Mirror TTA.
     Returns ALL class probabilities (we filter later based on ACTIVE_PHASE).
     """
-    if TILE_GRID >= 2:
-        return _probs_tiled(image_bytes)
-
     p1 = _probs_from_bytes_single(image_bytes)
 
     if not MIRROR_TTA:
@@ -476,7 +387,6 @@ def predict_debug(image_bytes: bytes, enhance: bool = False) -> dict:
         "all_labels": ALL_LABELS,
         "num_classes": NUM_CLASSES,
         "mirror_tta": MIRROR_TTA,
-        "tile_grid": TILE_GRID,
         "thresholds": {
             "N_THRESH": N_THRESH,
             "DISEASE_BLOCK_THRESH": DISEASE_BLOCK_THRESH,
