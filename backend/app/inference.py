@@ -69,6 +69,47 @@ DISEASE_BLOCK_THRESH = float(os.getenv("DISEASE_BLOCK", "0.35"))   # Any disease
 DISEASE_MIN_THRESH = float(os.getenv("DISEASE_MIN", "0.50"))       # Disease must be >= this to output disease
 MIRROR_TTA = str(os.getenv("MIRROR_TTA", "1")).strip() == "1"       # mirror augmentation on/off
 
+# ============ MODEL VERSION ============
+# v1 is the original ODIR dual-eye resnet18 at 224px. v6 is a single-eye
+# resnet50 at 768px with cumulative-ordinal heads, trained only on CC BY 4.0
+# data (Paraguay + RFMiD 2.0).
+#
+# Measured on 6,862 images external to both models:
+#
+#                     APTOS (3,662)        RFMiD 1.0 (3,200)
+#   v1   AUC 0.881   75.4% / 88.1%        87.2% / 72.4%
+#   v6   AUC 0.967   85.9% / 95.7%        93.0% / 74.8%
+#
+# v6 is better on both axes on both sets. Set MODEL_VERSION=v1 to roll back
+# instantly without a redeploy.
+MODEL_VERSION = os.getenv("MODEL_VERSION", "v6").strip().lower()
+
+# v6's calibration does not transfer as well as its ranking does. Its training
+# mix is ~35% diseased and skewed to severe disease, so a threshold picked on
+# its own held-out split (0.294, which scored 99.1% specificity there) collapses
+# to 41-53% specificity on real distributions. 0.898 was also chosen on that
+# held-out split - never on the sets quoted above - and is the point at which v6
+# beats v1 on both axes on both. Treat it as calibrated for screening
+# populations, and re-check it against local data before trusting it on a
+# population unlike either.
+V6_THRESH = float(os.getenv("V6_THRESH", "0.898"))
+V6_WEIGHTS = os.path.join(MODEL_DIR, "alati_dr_v6_ccby.pth")
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+GRADE_LABEL = {0: "No diabetic retinopathy", 1: "Mild", 2: "Moderate",
+               3: "Severe", 4: "Proliferative"}
+
+# Data attribution, required by CC BY 4.0 and surfaced through predict_debug:
+#   Benitez et al., "Dataset from fundus images for the study of diabetic
+#     retinopathy", Hospital de Clinicas, Universidad Nacional de Asuncion,
+#     Paraguay. CC BY 4.0. doi:10.5281/zenodo.4891308
+#   Panchal, Naik, Kokare, Pachade et al., "Retinal Fundus Multi-disease Image
+#     Dataset (RFMiD) 2.0". CC BY 4.0. doi:10.5281/zenodo.7505822
+V6_ATTRIBUTION = [
+    "Paraguay fundus dataset (Benitez et al.), CC BY 4.0, doi:10.5281/zenodo.4891308",
+    "RFMiD 2.0 (Panchal, Naik, Kokare, Pachade et al.), CC BY 4.0, doi:10.5281/zenodo.7505822",
+]
+
 
 def _sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
@@ -208,6 +249,128 @@ def load_model(model_variant: str):
 MODEL, ACTIVE_VARIANT, LOAD_MODE, WEIGHTS_SHA, WEIGHTS_SIZE = load_model(DEFAULT_VARIANT)
 
 
+# ============ v6: single-eye, 768px, cumulative-ordinal ============
+
+class DRNetV6(nn.Module):
+    """
+    Single-eye backbone with a cumulative-ordinal head.
+
+    Two departures from DualEyeModel that matter. It takes ONE image, because
+    the endpoint serves one - the old model was trained on genuine left/right
+    pairs and then called as MODEL(x, x) with one photograph duplicated, so it
+    was asked at inference for a relationship it never saw. And the head
+    predicts P(grade>=1..4) rather than a flat class, because grades are
+    ordered: confusing grade 4 with 3 should not cost what confusing it with 0
+    does. P(grade>=1) is "any DR" and P(grade>=2) is referable disease.
+    """
+    def __init__(self, backbone_name="resnet50"):
+        super().__init__()
+        if backbone_name == "resnet50":
+            self.backbone = models.resnet50(weights=None)
+            feat = 2048
+        else:
+            self.backbone = models.resnet18(weights=None)
+            feat = 512
+        self.backbone.fc = nn.Identity()
+        self.head = nn.Sequential(nn.Dropout(0.3), nn.Linear(feat, 4))
+
+    def forward(self, x):
+        return self.head(self.backbone(x))
+
+
+def _load_v6():
+    if not os.path.exists(V6_WEIGHTS):
+        raise RuntimeError(f"v6 weights not found: {V6_WEIGHTS}")
+    ck = torch.load(V6_WEIGHTS, map_location=DEVICE)
+    m = DRNetV6(ck.get("backbone", "resnet50")).to(DEVICE)
+    m.load_state_dict(ck["state"], strict=True)
+    m.eval()
+    tf = T.Compose([
+        T.Resize((ck.get("size", 768),) * 2),
+        T.ToTensor(),
+        # v1 was trained without normalization; v6 was trained with it, against
+        # an ImageNet-pretrained backbone. Getting this wrong silently degrades
+        # every prediction rather than raising.
+        T.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+    ])
+    sha = _sha256_bytes(open(V6_WEIGHTS, "rb").read())
+    return m, tf, ck.get("size", 768), sha, os.path.getsize(V6_WEIGHTS)
+
+
+V6_MODEL = V6_TRANSFORM = None
+V6_SIZE = V6_SHA = V6_BYTES = None
+if MODEL_VERSION == "v6":
+    V6_MODEL, V6_TRANSFORM, V6_SIZE, V6_SHA, V6_BYTES = _load_v6()
+
+
+def _crop_to_disc(img: Image.Image) -> Image.Image:
+    """Trim the black surround to the retinal disc's bounding box."""
+    a = np.asarray(img.convert("RGB"))
+    m = a.max(axis=2) > 18
+    if not m.any():
+        return img
+    rows = np.where(np.any(m, axis=1))[0]
+    cols = np.where(np.any(m, axis=0))[0]
+    if len(rows) < 2 or len(cols) < 2:
+        return img
+    return img.crop((cols[0], rows[0], cols[-1] + 1, rows[-1] + 1))
+
+
+def _square_pad(img: Image.Image) -> Image.Image:
+    """Pad to square on black so the disc is not distorted by the resize."""
+    w, h = img.size
+    s = max(w, h)
+    out = Image.new("RGB", (s, s), (0, 0, 0))
+    out.paste(img, ((s - w) // 2, (s - h) // 2))
+    return out
+
+
+def _v6_predict(image_bytes: bytes) -> dict:
+    """
+    Returns the same shape as predict_raw so callers do not change, plus the
+    severity fields v1 could never produce.
+    """
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    img = _square_pad(_crop_to_disc(img))
+    x = V6_TRANSFORM(img).unsqueeze(0)
+    batch = torch.cat([x, torch.flip(x, dims=[3])], dim=0) if MIRROR_TTA else x
+    with torch.no_grad():
+        p = torch.sigmoid(V6_MODEL(batch)).mean(dim=0).tolist()   # P(g>=1..4)
+
+    p_any, p_ref = float(p[0]), float(p[1])
+    # Grade is how many ordinal thresholds the image clears. Using the same
+    # cut-off throughout keeps the reported grade consistent with the yes/no
+    # decision - a "grade 2" that the binary call disagreed with would be
+    # incoherent.
+    grade = sum(1 for v in p if v >= V6_THRESH)
+    is_dr = p_any >= V6_THRESH
+
+    # No uncertain band: the quoted sensitivity and specificity describe a
+    # two-way decision at this threshold, and adding a third outcome would mean
+    # the deployed behaviour is not the behaviour that was measured.
+    code = "D" if is_dr else "N"
+    return {
+        "phase": ACTIVE_PHASE,
+        "phase_name": PHASE_NAME,
+        "model_version": "v6",
+        "top_code": code,
+        "top_prob": p_any,
+        "top3": [("D", p_any), ("N", 1.0 - p_any)],
+        "final_code": code,
+        "final_reason": f"v6 ordinal: P(any DR)={p_any:.3f} vs threshold {V6_THRESH:.3f}",
+        "translated": translate_code(code),
+        "probs": {"N": 1.0 - p_any, "D": p_any},
+        "confidence": p_any if is_dr else 1.0 - p_any,
+        "enhanced": False,
+        # new with v6 - v1 has no notion of severity at all
+        "grade": grade,
+        "grade_label": GRADE_LABEL.get(grade, "Unknown"),
+        "p_any_dr": p_any,
+        "p_referable": p_ref,
+        "ordinal": [float(v) for v in p],
+    }
+
+
 def _tensor_from_bytes(image_bytes: bytes) -> torch.Tensor:
     img = Image.open(BytesIO(image_bytes)).convert("RGB")
     x = TRANSFORM(img).unsqueeze(0)  # [1,3,224,224]
@@ -321,6 +484,13 @@ def predict_raw(image_bytes: bytes, enhance: bool = False) -> dict:
         image_bytes: raw image bytes
         enhance: if True, apply retinal enhancement before inference
     """
+    if MODEL_VERSION == "v6":
+        # v6 was trained on cropped, padded, ImageNet-normalized images. The v1
+        # enhancement pipeline (autocontrast, unsharp mask, contrast boost) was
+        # never part of that, so applying it would be a distribution shift, not
+        # a help. v6 does its own disc crop, which is the part that mattered.
+        return _v6_predict(image_bytes)
+
     # Apply enhancement if requested
     enhanced_applied = False
     if enhance:
@@ -375,8 +545,24 @@ def predict_debug(image_bytes: bytes, enhance: bool = False) -> dict:
     Full debug output including all metadata.
     """
     raw = predict_raw(image_bytes, enhance=enhance)
+    if MODEL_VERSION == "v6":
+        return {
+            "build_marker": BUILD_MARKER,
+            "model_version": "v6",
+            "active_variant": "resnet50-ordinal-768",
+            "load_mode": "strict",
+            "weights_sha": V6_SHA,
+            "weights_size": V6_BYTES,
+            "input_size": V6_SIZE,
+            "threshold": V6_THRESH,
+            "trained_on": ["paraguay", "rfmid2"],
+            "data_attribution": V6_ATTRIBUTION,
+            "mirror_tta": MIRROR_TTA,
+            **raw,
+        }
     return {
         "build_marker": BUILD_MARKER,
+        "model_version": "v1",
         "active_variant": ACTIVE_VARIANT,
         "load_mode": LOAD_MODE,
         "weights_sha": WEIGHTS_SHA,
