@@ -2658,6 +2658,83 @@ function qrsBounds(tr, r){
   return {on, off};
 }
 
+/* ---------- PR interval ----------
+   The P wave cannot be found the way the QRS is. qrsBounds thresholds slope at
+   6% of the peak, and the peak is the R upstroke - beside it a P wave is flat,
+   so that detector never fires on one. Hence a separate pass: take the TP
+   segment as the reference level, find the largest excursion from it in the
+   window before the complex, and walk outwards to where the trace leaves that
+   level.
+
+   Lead II is used because the P vector points roughly at it, which is the same
+   reason it is the conventional rhythm strip.
+
+   Returns null rather than a guess when nothing clears the noise floor. Absent
+   P waves are themselves a finding - atrial fibrillation, junctional rhythm -
+   and inventing a PR interval for them would turn a real observation into a
+   fabricated number. */
+function prInterval(tr, beats, rr, qt){
+  if(!tr || !beats.length || !rr) return null;
+  const out = {pr:[], pdur:[], pamp:[]};
+  // The window must stop short of the previous T wave. A T is several times
+  // taller than a P, so if any of it falls inside, the "largest excursion" is
+  // the T and the interval comes back enormous - at 110 bpm this read 250 ms
+  // against a true 140. The previous T ends (RR - QT) before this complex, so
+  // that, less a margin, is the furthest it is ever safe to look.
+  let backMs = Math.min(320, rr*0.5);
+  if(qt!=null && qt>0) backMs = Math.min(backMs, Math.max(70, rr - qt - 20));
+  const back = Math.round(msToPx(backMs));
+  const gap  = Math.round(msToPx(15));                      // a P never abuts the QRS
+  const minWin = Math.round(msToPx(60));
+  beats.forEach(r=>{
+    const b = qrsBounds(tr, r); if(!b) return;
+    const hi = b.on - gap, lo = Math.max(1, b.on - back);
+    if(hi - lo < minWin) return;
+    // TP segment: the earliest slice of the window, furthest from both waves
+    const refN = Math.max(3, Math.round(msToPx(40)));
+    let acc=0, cnt=0;
+    for(let k=lo; k<lo+refN && k<hi; k++){ if(tr.have[k]){ acc+=tr.mid[k]; cnt++; } }
+    if(cnt < 2) return;
+    const ref = acc/cnt;
+    let pk=-1, best=0;
+    for(let k=lo;k<=hi;k++){
+      if(!tr.have[k]) continue;
+      const mm = yToMm(tr.mid[k], ref);
+      if(Math.abs(mm) > Math.abs(best)){ best=mm; pk=k; }
+    }
+    // 0.4 mm is below any real P wave but above trace noise on a decent photo
+    if(pk<0 || Math.abs(best) < 0.4) return;
+    const thr = Math.abs(best)*0.25;
+    let on = pk;
+    while(on > lo && tr.have[on] && Math.abs(yToMm(tr.mid[on], ref)) > thr) on--;
+    let off = pk;
+    while(off < hi && tr.have[off] && Math.abs(yToMm(tr.mid[off], ref)) > thr) off++;
+    const pr = pxToMs(b.on - on);
+    if(pr < 80 || pr > 400) return;   // outside this it is not a PR interval
+    out.pr.push(pr);
+    out.pdur.push(pxToMs(off-on));
+    out.pamp.push(Math.abs(best));
+  });
+  if(out.pr.length < 3) return null;  // two beats are not evidence of consistency
+  const med = a =>{ const s=a.slice().sort((x,y)=>x-y); return s[s.length>>1]; };
+
+  // A PR interval only means something if the same atrial event precedes every
+  // complex. In atrial fibrillation there is no P wave at all, but this search
+  // still finds *something* - fibrillatory waves, the tail of a T - and returns
+  // a number. Reporting it would assert organised atrial conduction that is not
+  // there, which is worse than reporting nothing.
+  //
+  // What separates the two is consistency, not amplitude: conducted sinus beats
+  // hold PR nearly fixed, while noise picked out of fibrillation scatters. A
+  // median absolute deviation above 25 ms is not a PR interval.
+  const m0 = med(out.pr);
+  const mad = med(out.pr.map(v=>Math.abs(v-m0)));
+  if(mad > 25) return null;
+
+  return { pr:Math.round(m0), pdur:Math.round(med(out.pdur)),
+           pamp:+med(out.pamp).toFixed(1), n:out.pr.length, mad:Math.round(mad) };
+}
+
 /* ---------- T wave end, tangent method ---------- */
 function tEnd(tr, off, rr){
   const {n, mid, baseline, have} = tr;
@@ -2837,7 +2914,19 @@ function autoRead(){
   const nI = net("I"), nF = net("aVF");
   if(nI!=null && nF!=null && (Math.abs(nI)+Math.abs(nF) > 0.5)) axis = Math.round(Math.atan2(nF, nI)*180/Math.PI);
 
-  READ.glob = {rate, rr, cv, qrs, qt, axis, beats:beats.length, leadsRead};
+  // PR is only defined when the same atrial event conducts to every complex.
+  // An irregularly irregular ventricular response is the signature of atrial
+  // fibrillation, where there is no P wave to start the interval from - the
+  // search still returns something consistent (a T tail sits at a fairly fixed
+  // offset from the next QRS), so the measurement cannot be trusted to police
+  // itself here. Conventional reporting omits PR in that rhythm, and so does
+  // this: leaving it blank puts PR on the "not entered" list, which is true,
+  // instead of asserting AV conduction timing that does not exist.
+  const organised = (cv == null) || cv <= 0.20;
+  const P = (rtr && beats.length && rr && organised) ? prInterval(rtr, beats, rr, qt) : null;
+
+  READ.glob = {rate, rr, cv, qrs, qt, axis, beats:beats.length, leadsRead,
+               pr: P ? P.pr : null, pdur: P ? P.pdur : null, pamp: P ? P.pamp : null};
   if(READ.skew) READ.notes.push({k:"ok", t:"Straightened by "+READ.skew.toFixed(1)+"°",
     d:"The photo was tilted, which would have thrown the grid measurement out. It has been rotated square before measuring."});
   // Scale sanity from physiology. A wrong mm-per-pixel scales every interval by the
@@ -2869,9 +2958,9 @@ const T_CAT = mm => mm==null ? "" : (mm >= 1 ? "upright" : mm > -1 ? "flat" : mm
    and leaving the last one's ST values on screen after a refused read would present
    stale measurements as if they belonged to the ECG now on the page. */
 function clearReading(){
-  ["rate","qrs","qt","axis"].forEach(k=>{ S.m[k]=null; });
+  ["rate","qrs","qt","axis","pr","pdur","pamp"].forEach(k=>{ S.m[k]=null; });
   S.m.rhythm = "";
-  ["iRate","iQRS","iQT","iAxis"].forEach(id=>{ const n=$("#"+id); if(n) n.value=""; });
+  ["iRate","iQRS","iQT","iAxis","iPR","iPDur","iPAmp"].forEach(id=>{ const n=$("#"+id); if(n) n.value=""; });
   const r=$("#iRhythm"); if(r) r.value="";
   LEADS.forEach(L=>{
     S.st[L]=null; S.t[L]=""; S.q[L]="";
@@ -2892,6 +2981,9 @@ function applyReading(){
   if(g.qrs!=null){ S.m.qrs=g.qrs; set("iQRS",g.qrs); }
   if(g.qt!=null){ S.m.qt=g.qt; set("iQT",g.qt); }
   if(g.axis!=null){ S.m.axis=g.axis; set("iAxis",g.axis); }
+  if(g.pr!=null){ S.m.pr=g.pr; set("iPR",g.pr); }
+  if(g.pdur!=null){ S.m.pdur=g.pdur; set("iPDur",g.pdur); }
+  if(g.pamp!=null){ S.m.pamp=g.pamp; set("iPAmp",g.pamp); }
   if(g.cv!=null){
     S.m.rhythm = g.cv > 0.20 ? "irregular_irreg" : g.cv > 0.11 ? "reg_irreg" : "regular";
     set("iRhythm", S.m.rhythm);
