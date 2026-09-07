@@ -4,7 +4,11 @@ services:
     env: docker
     rootDir: backend
     dockerfilePath: Dockerfile
-    plan: starter
+    # standard is 2GB. starter is 512MB, which no 768px resnet50 fits in: v6
+    # peaks at 1,141MB and v8 (the v6+v7b ensemble) at 1,299MB, both measured.
+    # That ceiling is why f41beda and bd024f6 died during startup rather than
+    # serving. v8 has ~700MB of headroom here at ~900ms/image on CPU.
+    plan: standard
     autoDeploy: true
     envVars:
       - key: DATABASE_URL
