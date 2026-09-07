@@ -35,7 +35,7 @@ services:
       # v8 (the calibrated v6+v7b ensemble, ~1.3GB) needs plan: standard and the
       # v7b weights committed. Changing this value is then the whole switch.
       - key: MODEL_VERSION
-        value: v1
+        value: v8
 
       - key: MODEL_VARIANT
         value: resnet18

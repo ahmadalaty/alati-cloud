@@ -63,6 +63,13 @@ NUM_CLASSES = len(ALL_LABELS)  # Model still trained on all classes
 DEFAULT_VARIANT = os.getenv("MODEL_VARIANT", "resnet18").strip().lower()
 DEVICE = "cpu"
 
+# A container's CPU quota is not what torch sees. torch.get_num_threads() reads
+# the host's core count, not the cgroup limit, so on a 1-CPU instance it spawns a
+# dozen intra-op workers that contend for one core and each carry their own
+# buffers - slower and heavier than running single-threaded. Pin it explicitly.
+TORCH_THREADS = max(1, int(os.getenv("TORCH_THREADS", "2")))
+torch.set_num_threads(TORCH_THREADS)
+
 # ============ THRESHOLDS (Tunable per phase) ============
 N_THRESH = float(os.getenv("N_THRESH", "0.70"))                    # Normal strong
 DISEASE_BLOCK_THRESH = float(os.getenv("DISEASE_BLOCK", "0.35"))   # Any disease above this blocks Normal
