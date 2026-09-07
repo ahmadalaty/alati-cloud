@@ -19,7 +19,20 @@ services:
       - key: APP_URL
         value: https://alati-api.onrender.com
 
-      # Model selection
+      # Model selection.
+      #
+      # MODEL_VERSION must be set explicitly. inference.py defaults it to "v6",
+      # and v6 loads its weights at module import - before uvicorn binds a port -
+      # peaking at ~1.14GB against this plan's 512MB. The container is killed
+      # during startup, so the deploy fails rather than degrading: f41beda and
+      # bd024f6 both died this way and never reached production. v1 is a 224px
+      # resnet18 and starts fine.
+      #
+      # v8 (the calibrated v6+v7b ensemble, ~1.3GB) needs plan: standard and the
+      # v7b weights committed. Changing this value is then the whole switch.
+      - key: MODEL_VERSION
+        value: v1
+
       - key: MODEL_VARIANT
         value: resnet18
 
