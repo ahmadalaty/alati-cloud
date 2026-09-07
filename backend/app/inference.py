@@ -127,6 +127,22 @@ V6_ATTRIBUTION = [
     "RFMiD 2.0 (Panchal, Naik, Kokare, Pachade et al.), CC BY 4.0, doi:10.5281/zenodo.7505822",
 ]
 
+# Attribution belongs to the model that is loaded, not to the module. Returning
+# the CC BY credits unconditionally meant /model_info credited Paraguay and
+# RFMiD 2.0 while serving v1, which was trained on neither - a false provenance
+# claim on a public endpoint, and in the one direction that matters here.
+# A licence is asserted only where one is established at source.
+SOURCE_ATTRIBUTION = {
+    "paraguay": "Paraguay fundus dataset (Benitez et al.), CC BY 4.0, doi:10.5281/zenodo.4891308",
+    "rfmid2": "RFMiD 2.0 (Panchal, Naik, Kokare, Pachade et al.), CC BY 4.0, doi:10.5281/zenodo.7505822",
+    "rfmid": "RFMiD 1.0 (Pachade, Porwal, Kokare et al.), doi:10.3390/data6020014",
+}
+
+
+def _attribution_for(sources) -> list:
+    """Credits for the sources the loaded model was actually trained on."""
+    return [SOURCE_ATTRIBUTION[k] for k in sorted(sources or []) if k in SOURCE_ATTRIBUTION]
+
 
 def _sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
@@ -540,7 +556,7 @@ def model_info() -> dict:
         "build_marker": BUILD_MARKER,
         "severity_available": SEVERITY_TRAINED,
         "trained_on": V6_SOURCES,
-        "data_attribution": V6_ATTRIBUTION,
+        "data_attribution": _attribution_for(V6_SOURCES),
         "mirror_tta": MIRROR_TTA,
     }
     if MODEL_VERSION == "v8":
@@ -752,7 +768,7 @@ def predict_debug(image_bytes: bytes, enhance: bool = False) -> dict:
             "threshold": V6_THRESH,
             "trained_on": V6_SOURCES,
             "severity_available": SEVERITY_TRAINED,
-            "data_attribution": V6_ATTRIBUTION,
+            "data_attribution": _attribution_for(V6_SOURCES),
             "mirror_tta": MIRROR_TTA,
             **raw,
         }
