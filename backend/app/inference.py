@@ -94,6 +94,23 @@ MODEL_VERSION = os.getenv("MODEL_VERSION", "v6").strip().lower()
 # population unlike either.
 V6_THRESH = float(os.getenv("V6_THRESH", "0.898"))
 V6_WEIGHTS = os.path.join(MODEL_DIR, "alati_dr_v6_ccby.pth")
+
+# v8 is not a new set of weights. It is v6 and v7b run together, each head's raw
+# score mapped through that model's empirical CDF, the two averaged, passed
+# through an isotonic fit and forced monotone across heads. The two models
+# trained on disjoint data and fail on different images, which is why averaging
+# them beats either alone: on the held-out half of APTOS (1,831 images, used for
+# nothing else) referable-DR AUC is 0.940 against v6's 0.916 and v7b's 0.899,
+# +0.024 [+0.017, +0.031] and +0.041 [+0.032, +0.050], both p<0.001 paired.
+#
+# The calibration is the point. v7b alone ranks well but its referable positives
+# sit at median 0.018, so it needs a 2.1e-4 threshold; dropped into this module
+# under V6_THRESH it would have reported 9.2% of referable cases as grade >= 2
+# and never returned grade 4 at all - silently, with no error. Calibrated, the
+# operating points are 0.731 and 0.187 and expected calibration error on the
+# referable head is 0.021 against v6's 0.184.
+V7B_WEIGHTS = os.path.join(MODEL_DIR, "alati_dr_v7b.pth")
+V8_CALIBRATION = os.path.join(MODEL_DIR, "v8_calibration.json")
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 GRADE_LABEL = {0: "No diabetic retinopathy", 1: "Mild", 2: "Moderate",
@@ -278,10 +295,10 @@ class DRNetV6(nn.Module):
         return self.head(self.backbone(x))
 
 
-def _load_v6():
-    if not os.path.exists(V6_WEIGHTS):
-        raise RuntimeError(f"v6 weights not found: {V6_WEIGHTS}")
-    ck = torch.load(V6_WEIGHTS, map_location=DEVICE)
+def _load_ordinal(path):
+    if not os.path.exists(path):
+        raise RuntimeError(f"weights not found for {MODEL_VERSION}: {path}")
+    ck = torch.load(path, map_location=DEVICE)
     m = DRNetV6(ck.get("backbone", "resnet50")).to(DEVICE)
     m.load_state_dict(ck["state"], strict=True)
     m.eval()
@@ -293,14 +310,58 @@ def _load_v6():
         # every prediction rather than raising.
         T.Normalize(IMAGENET_MEAN, IMAGENET_STD),
     ])
-    sha = _sha256_bytes(open(V6_WEIGHTS, "rb").read())
-    return m, tf, ck.get("size", 768), sha, os.path.getsize(V6_WEIGHTS)
+    sha = _sha256_bytes(open(path, "rb").read())
+    return (m, tf, ck.get("size", 768), sha, os.path.getsize(path),
+            list(ck.get("sources", [])))
 
 
 V6_MODEL = V6_TRANSFORM = None
 V6_SIZE = V6_SHA = V6_BYTES = None
+V6_SOURCES = []
+V8_MODELS = {}
+V8_TRANSFORMS = {}
+V8_CAL = None
+V8_THRESH = []
+# Whether the severity heads were actually trained. A model trained only on
+# binary-labelled data has P(grade>=2..4) masked out of its loss for every
+# positive, so those heads never see a positive example and emit noise - on
+# APTOS that produced an inverted AUC of 0.086. Grades are reported only when a
+# graded source was in the training mix.
+SEVERITY_TRAINED = False
+GRADED_SOURCES = {"paraguay"}
 if MODEL_VERSION == "v6":
-    V6_MODEL, V6_TRANSFORM, V6_SIZE, V6_SHA, V6_BYTES = _load_v6()
+    V6_MODEL, V6_TRANSFORM, V6_SIZE, V6_SHA, V6_BYTES, V6_SOURCES = _load_ordinal(V6_WEIGHTS)
+    SEVERITY_TRAINED = bool(GRADED_SOURCES & set(V6_SOURCES))
+elif MODEL_VERSION == "v8":
+    with open(V8_CALIBRATION, "r", encoding="utf-8") as fh:
+        V8_CAL = json.load(fh)
+    for _key, _path in (("v6", V6_WEIGHTS), ("v7b", V7B_WEIGHTS)):
+        _m, _tf, _size, _sha, _bytes, _src = _load_ordinal(_path)
+        # THE GUARD. A calibration curve belongs to the exact weights it was fit
+        # against; pair it with different ones and every threshold below is
+        # meaningless while the service keeps answering confidently. This is the
+        # failure that a v7b drop-in would have caused, so it refuses to start
+        # rather than serve. Same reasoning as SEVERITY_TRAINED, one level up.
+        _want = V8_CAL["weights"][_key]["sha256"]
+        if _sha != _want:
+            raise RuntimeError(
+                f"v8 calibration/weights mismatch for {_key}: {os.path.basename(_path)} "
+                f"is sha256 {_sha[:16]}, calibration was fit against {_want[:16]}. "
+                f"Refusing to start - thresholds from this artifact do not describe "
+                f"these weights."
+            )
+        V8_MODELS[_key], V8_TRANSFORMS[_key] = _m, _tf
+        if _key == "v6":
+            V6_SIZE, V6_SHA, V6_BYTES, V6_SOURCES = _size, _sha, _bytes, _src
+        else:
+            V6_SOURCES = sorted(set(V6_SOURCES) | set(_src))
+    V8_THRESH = [float(V8_CAL["thresholds"][str(h)]) for h in range(4)]
+    SEVERITY_TRAINED = bool(GRADED_SOURCES & set(V6_SOURCES))
+    if os.getenv("V6_THRESH"):
+        # V6_THRESH is v6's operating point and nothing else's. Honouring it here
+        # is how the 9.2% failure would have happened.
+        raise RuntimeError("V6_THRESH is set but MODEL_VERSION=v8; v8 takes its "
+                           "thresholds from v8_calibration.json. Unset V6_THRESH.")
 
 
 def _crop_to_disc(img: Image.Image) -> Image.Image:
@@ -349,26 +410,155 @@ def _v6_predict(image_bytes: bytes) -> dict:
     # two-way decision at this threshold, and adding a third outcome would mean
     # the deployed behaviour is not the behaviour that was measured.
     code = "D" if is_dr else "N"
+
+    # The severity heads are only trustworthy on a model whose training data
+    # carried real grades. Where they were masked out (a binary-labelled source),
+    # SEVERITY_TRAINED is false and the grade is withheld rather than shown -
+    # an untrained ordinal head still emits a number, and that number is noise.
+    if is_dr and SEVERITY_TRAINED and grade >= 1:
+        display = f"Diabetic Retinopathy — {GRADE_LABEL[grade]} (grade {grade})"
+    else:
+        display = translate_code(code)
+
     return {
         "phase": ACTIVE_PHASE,
         "phase_name": PHASE_NAME,
-        "model_version": "v6",
+        "model_version": MODEL_VERSION,
         "top_code": code,
         "top_prob": p_any,
         "top3": [("D", p_any), ("N", 1.0 - p_any)],
         "final_code": code,
-        "final_reason": f"v6 ordinal: P(any DR)={p_any:.3f} vs threshold {V6_THRESH:.3f}",
+        "final_reason": f"{MODEL_VERSION} ordinal: P(any DR)={p_any:.3f} vs threshold {V6_THRESH:.3f}",
         "translated": translate_code(code),
+        "display": display,
         "probs": {"N": 1.0 - p_any, "D": p_any},
         "confidence": p_any if is_dr else 1.0 - p_any,
         "enhanced": False,
-        # new with v6 - v1 has no notion of severity at all
-        "grade": grade,
-        "grade_label": GRADE_LABEL.get(grade, "Unknown"),
+        # new here - v1 has no notion of severity at all
+        "grade": grade if SEVERITY_TRAINED else None,
+        "grade_label": GRADE_LABEL.get(grade, "Unknown") if SEVERITY_TRAINED else None,
+        "severity_available": SEVERITY_TRAINED,
         "p_any_dr": p_any,
         "p_referable": p_ref,
         "ordinal": [float(v) for v in p],
     }
+
+
+def _cdf(cal, x):
+    """Empirical CDF lookup. cal is (breakpoints, values), both ascending."""
+    bp, val = cal
+    return float(np.interp(x, bp, val, left=0.0, right=1.0))
+
+
+def _pav(cal, x):
+    """Isotonic (pool-adjacent-violators) lookup: piecewise constant, ascending."""
+    bp, val = cal
+    i = int(np.searchsorted(np.asarray(bp), x, side="left"))
+    return float(val[min(i, len(val) - 1)])
+
+
+def _v8_scores(img: Image.Image) -> List[float]:
+    """Calibrated, monotone P(grade >= 1..4) from the v6+v7b ensemble."""
+    per_model = []
+    for key in ("v6", "v7b"):
+        x = V8_TRANSFORMS[key](img).unsqueeze(0)
+        batch = torch.cat([x, torch.flip(x, dims=[3])], dim=0) if MIRROR_TTA else x
+        with torch.no_grad():
+            raw = torch.sigmoid(V8_MODELS[key](batch)).mean(dim=0).tolist()
+        per_model.append([_cdf(V8_CAL["cdf"][key][h], raw[h]) for h in range(4)])
+    ens = [(per_model[0][h] + per_model[1][h]) / 2.0 for h in range(4)]
+    cal = [_pav(V8_CAL["isotonic"][str(h)], ens[h]) for h in range(4)]
+    out, cur = [], 1.0
+    for v in cal:                      # P(>=1) >= P(>=2) >= P(>=3) >= P(>=4)
+        cur = min(cur, v)
+        out.append(cur)
+    return out
+
+
+def _v8_predict(image_bytes: bytes) -> dict:
+    """Same return shape as _v6_predict, so no caller changes."""
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    img = _square_pad(_crop_to_disc(img))
+    p = _v8_scores(img)
+    p_any, p_ref = float(p[0]), float(p[1])
+
+    referred = p_ref >= V8_THRESH[1]
+    # A referral that came back "no DR" would be incoherent, so the referral head
+    # also forces the binary call. This is the deployed rule and it is the rule
+    # that was measured - the held-out figures below describe this exact
+    # disjunction, not the head-0 threshold on its own.
+    is_dr = (p_any >= V8_THRESH[0]) or referred
+
+    # Expected grade: round the sum of the calibrated head probabilities. Chosen
+    # over per-head thresholding, which cost 24 points of within-one agreement by
+    # picking aggressive cut-offs on the rare high grades.
+    grade = int(min(4, max(0, round(sum(p)))))
+    if referred:
+        grade = max(grade, 2)
+
+    code = "D" if is_dr else "N"
+    if is_dr and SEVERITY_TRAINED and grade >= 1:
+        display = f"Diabetic Retinopathy — {GRADE_LABEL[grade]} (grade {grade})"
+    else:
+        display = translate_code(code)
+
+    return {
+        "phase": ACTIVE_PHASE,
+        "phase_name": PHASE_NAME,
+        "model_version": "v8",
+        "top_code": code,
+        "top_prob": p_any,
+        "top3": [("D", p_any), ("N", 1.0 - p_any)],
+        "final_code": code,
+        "final_reason": (f"v8 ensemble: P(any DR)={p_any:.3f} vs {V8_THRESH[0]:.3f}, "
+                         f"P(referable)={p_ref:.3f} vs {V8_THRESH[1]:.3f}"),
+        "translated": translate_code(code),
+        "display": display,
+        "probs": {"N": 1.0 - p_any, "D": p_any},
+        "confidence": p_any if is_dr else 1.0 - p_any,
+        "enhanced": False,
+        "grade": grade if SEVERITY_TRAINED else None,
+        "grade_label": GRADE_LABEL.get(grade, "Unknown") if SEVERITY_TRAINED else None,
+        "severity_available": SEVERITY_TRAINED,
+        "p_any_dr": p_any,
+        "p_referable": p_ref,
+        "referred": referred,
+        "ordinal": [float(v) for v in p],
+    }
+
+
+def model_info() -> dict:
+    """
+    What is actually running. Unauthenticated on purpose: after the 4 September
+    deploy failure there was no way to tell from outside whether the service was
+    serving v6 or had fallen back to v1, and MODEL_VERSION is an env var that can
+    change without a commit. No patient data, no secrets - just which weights are
+    loaded and at what thresholds.
+    """
+    info = {
+        "model_version": MODEL_VERSION,
+        "build_marker": BUILD_MARKER,
+        "severity_available": SEVERITY_TRAINED,
+        "trained_on": V6_SOURCES,
+        "data_attribution": V6_ATTRIBUTION,
+        "mirror_tta": MIRROR_TTA,
+    }
+    if MODEL_VERSION == "v8":
+        info.update({
+            "ensemble": V8_CAL.get("models"),
+            "weights_sha": {k: v["sha256"][:16] for k, v in V8_CAL["weights"].items()},
+            "thresholds": {"any_dr": V8_THRESH[0], "referable": V8_THRESH[1]},
+            "grade_rule": V8_CAL.get("grade_rule"),
+            "calibrated_on": V8_CAL.get("calibrated_on"),
+            "measured": V8_CAL.get("measured"),
+        })
+    elif MODEL_VERSION == "v6":
+        info.update({"weights_sha": V6_SHA[:16] if V6_SHA else None,
+                     "thresholds": {"any_dr": V6_THRESH}})
+    else:
+        info.update({"weights_sha": WEIGHTS_SHA[:16] if WEIGHTS_SHA else None,
+                     "active_variant": ACTIVE_VARIANT})
+    return info
 
 
 def _tensor_from_bytes(image_bytes: bytes) -> torch.Tensor:
@@ -484,8 +674,10 @@ def predict_raw(image_bytes: bytes, enhance: bool = False) -> dict:
         image_bytes: raw image bytes
         enhance: if True, apply retinal enhancement before inference
     """
+    if MODEL_VERSION == "v8":
+        return _v8_predict(image_bytes)
     if MODEL_VERSION == "v6":
-        # v6 was trained on cropped, padded, ImageNet-normalized images. The v1
+        # These were trained on cropped, padded, ImageNet-normalized images. The v1
         # enhancement pipeline (autocontrast, unsharp mask, contrast boost) was
         # never part of that, so applying it would be a distribution shift, not
         # a help. v6 does its own disc crop, which is the part that mattered.
@@ -545,17 +737,21 @@ def predict_debug(image_bytes: bytes, enhance: bool = False) -> dict:
     Full debug output including all metadata.
     """
     raw = predict_raw(image_bytes, enhance=enhance)
+    if MODEL_VERSION == "v8":
+        return {"build_marker": BUILD_MARKER, "load_mode": "strict",
+                "active_variant": "v6+v7b calibrated ensemble", **model_info(), **raw}
     if MODEL_VERSION == "v6":
         return {
             "build_marker": BUILD_MARKER,
-            "model_version": "v6",
+            "model_version": MODEL_VERSION,
             "active_variant": "resnet50-ordinal-768",
             "load_mode": "strict",
             "weights_sha": V6_SHA,
             "weights_size": V6_BYTES,
             "input_size": V6_SIZE,
             "threshold": V6_THRESH,
-            "trained_on": ["paraguay", "rfmid2"],
+            "trained_on": V6_SOURCES,
+            "severity_available": SEVERITY_TRAINED,
             "data_attribution": V6_ATTRIBUTION,
             "mirror_tta": MIRROR_TTA,
             **raw,

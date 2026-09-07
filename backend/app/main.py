@@ -39,6 +39,7 @@ from .auth import (
 from .inference import (
     predict_diagnosis,
     predict_debug,
+    model_info,
     BUILD_MARKER as INF_MARKER,
     ACTIVE_VARIANT,
 )
@@ -672,6 +673,11 @@ SCAN_HTML = """<!DOCTYPE html>
             <div class="result-label">Diagnosis</div>
             <div class="result-value" id="result-diagnosis">-</div>
           </div>
+          <div class="result-item" id="result-grade-item" style="display:none;">
+            <div class="result-label">Severity</div>
+            <div class="result-value" id="result-grade">-</div>
+            <div style="font-size:12px;color:#666;margin-top:4px;" id="result-grade-note"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -758,8 +764,26 @@ SCAN_HTML = """<!DOCTYPE html>
         
         if (res.ok) {
           const data = await res.json();
-          document.getElementById('result-diagnosis').textContent = data.left_diagnosis || data.right_diagnosis || 'Analysis complete';
-          
+          const dx = data.left_diagnosis || data.right_diagnosis || 'Analysis complete';
+          document.getElementById('result-diagnosis').textContent = dx;
+
+          // Severity is only shown when the model actually reports one. A model
+          // trained on binary-labelled data emits a grade from heads that were
+          // never supervised, so the API withholds it and this stays hidden
+          // rather than printing a number nobody should act on.
+          const gradeItem = document.getElementById('result-grade-item');
+          const m = /—\s*(.+?)\s*\(grade\s*(\d)\)/.exec(dx);
+          if (m) {
+            document.getElementById('result-grade').textContent = m[1] + ' — ICDR grade ' + m[2];
+            document.getElementById('result-grade-note').textContent =
+              Number(m[2]) >= 2
+                ? 'Referable: moderate or worse normally warrants ophthalmology review.'
+                : 'Mild disease is usually monitored rather than referred.';
+            gradeItem.style.display = '';
+          } else {
+            gradeItem.style.display = 'none';
+          }
+
           // Show done banner first, then results
           doneBanner.classList.add('active');
           setTimeout(() => {
@@ -1728,6 +1752,20 @@ def health():
     return {"ok": True}
 
 
+@app.get("/model_info")
+def model_info_route():
+    """
+    Which model is actually serving, and at what thresholds.
+
+    Unauthenticated deliberately. MODEL_VERSION is an environment variable, so
+    the running model can change without a commit, and after the 4 September
+    deploy failure there was no way to tell from outside whether the service was
+    on v6 or had fallen back to v1. /health returning {"ok": true} answered the
+    wrong question. Exposes no patient data and no secrets.
+    """
+    return model_info()
+
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return LOGIN_HTML
@@ -2530,8 +2568,10 @@ async def scan_run(
 
             # Images are only held in memory for inference and are never
             # persisted anywhere — only the resulting diagnosis is saved.
-            left_diag = predict_debug(left_bytes, enhance=enhance_flag).get("translated") or "Other"
-            right_diag = predict_debug(right_bytes, enhance=enhance_flag).get("translated") or "Other"
+            _l = predict_debug(left_bytes, enhance=enhance_flag)
+            _rr = predict_debug(right_bytes, enhance=enhance_flag)
+            left_diag = _l.get("display") or _l.get("translated") or "Other"
+            right_diag = _rr.get("display") or _rr.get("translated") or "Other"
 
             scan = Scan(
                 user_id=user_id,
@@ -2556,7 +2596,11 @@ async def scan_run(
 
         # Image is only held in memory for inference and is never persisted
         # anywhere — only the resulting diagnosis is saved.
-        diag = predict_debug(image_bytes, enhance=enhance_flag).get("translated") or "Other"
+        _r = predict_debug(image_bytes, enhance=enhance_flag)
+        # "display" carries the severity when the model has trained severity
+        # heads; it falls back to the plain label otherwise, so a model without
+        # grading never writes a grade into the record.
+        diag = _r.get("display") or _r.get("translated") or "Other"
 
         scan = Scan(
             user_id=user_id, eye_mode=eye_mode, status="done",
