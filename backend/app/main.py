@@ -674,7 +674,7 @@ SCAN_HTML = """<!DOCTYPE html>
             <div class="result-value" id="result-diagnosis">-</div>
           </div>
           <div class="result-item" id="result-grade-item" style="display:none;">
-            <div class="result-label">Severity</div>
+            <div class="result-label">Referral</div>
             <div class="result-value" id="result-grade">-</div>
             <div style="font-size:12px;color:#666;margin-top:4px;" id="result-grade-note"></div>
           </div>
@@ -767,18 +767,20 @@ SCAN_HTML = """<!DOCTYPE html>
           const dx = data.left_diagnosis || data.right_diagnosis || 'Analysis complete';
           document.getElementById('result-diagnosis').textContent = dx;
 
-          // Severity is only shown when the model actually reports one. A model
-          // trained on binary-labelled data emits a grade from heads that were
-          // never supervised, so the API withholds it and this stays hidden
-          // rather than printing a number nobody should act on.
+          // Referral, not severity. The model reports whether the eye needs an
+          // ophthalmologist, which it does well (AUC 0.940, 97.9% sensitivity).
+          // It does NOT report an ICDR grade: its severity heads cannot rank
+          // grades above 2, so a grade shown here would be wrong most of the
+          // time and would understate urgency on the worst eyes.
           const gradeItem = document.getElementById('result-grade-item');
-          const m = /—\s*(.+?)\s*\(grade\s*(\d)\)/.exec(dx);
-          if (m) {
-            document.getElementById('result-grade').textContent = m[1] + ' — ICDR grade ' + m[2];
-            document.getElementById('result-grade-note').textContent =
-              Number(m[2]) >= 2
-                ? 'Referable: moderate or worse normally warrants ophthalmology review.'
-                : 'Mild disease is usually monitored rather than referred.';
+          const isDR = /diabetic retinopathy/i.test(dx);
+          const notRef = /not referable/i.test(dx);
+          if (isDR) {
+            document.getElementById('result-grade').textContent =
+              notRef ? 'Not referable at this time' : 'Referable';
+            document.getElementById('result-grade-note').textContent = notRef
+              ? 'Disease is present but below the referral threshold. Monitor and rescreen; this is not a normal result.'
+              : 'Ophthalmology review recommended. Severity is not graded — assess the eye clinically.';
             gradeItem.style.display = '';
           } else {
             gradeItem.style.display = 'none';

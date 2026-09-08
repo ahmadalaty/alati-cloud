@@ -116,6 +116,21 @@ V6_WEIGHTS = os.path.join(MODEL_DIR, "alati_dr_v6_ccby.pth")
 # and never returned grade 4 at all - silently, with no error. Calibrated, the
 # operating points are 0.731 and 0.187 and expected calibration error on the
 # referable head is 0.021 against v6's 0.184.
+# The numeric ICDR grade is NOT reported. v8's grade is right 2.6% of the time
+# outside grades 0 and 2: on 1,831 held-out images it recovered 2 of 189 grade-1
+# cases, 8 of 98 grade-3 and 1 of 142 grade-4, reporting true proliferative
+# disease as "Moderate" in 109 of 142. The heads cannot rank severity either -
+# P(a grade-3 image scores above a grade-2 one) is 0.474, a coin flip - so no
+# threshold, cut-point or probability-banding scheme recovers it. All of that was
+# measured; five separate attempts are recorded in HANDOVER.md.
+#
+# The cause is supervision, not architecture: severity is trained on Paraguay
+# alone, 1,437 images containing five grade-1 examples. Until graded data exists
+# the honest output is the referral decision, which is sound - AUC 0.940, 97.9%
+# sensitivity. Set GRADE_REPORTING=1 to surface the grade anyway; it is off
+# because a "Moderate" label on a proliferative eye understates urgency in the
+# one direction that harms a patient.
+GRADE_REPORTING = str(os.getenv("GRADE_REPORTING", "0")).strip() == "1"
 V7B_WEIGHTS = os.path.join(MODEL_DIR, "alati_dr_v7b.pth")
 V8_CALIBRATION = os.path.join(MODEL_DIR, "v8_calibration.json")
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -520,10 +535,16 @@ def _v8_predict(image_bytes: bytes) -> dict:
         grade = max(grade, 2)
 
     code = "D" if is_dr else "N"
-    if is_dr and SEVERITY_TRAINED and grade >= 1:
-        display = f"Diabetic Retinopathy — {GRADE_LABEL[grade]} (grade {grade})"
-    else:
+    # Referral, not severity. "not referable" still means disease is present and
+    # should be monitored - it is not a clean result.
+    if not is_dr:
         display = translate_code(code)
+    elif referred:
+        display = "Diabetic retinopathy — referable"
+    else:
+        display = "Diabetic retinopathy — not referable"
+    if is_dr and GRADE_REPORTING and SEVERITY_TRAINED:
+        display += f" (grade {grade})"
 
     return {
         "phase": ACTIVE_PHASE,
@@ -540,9 +561,15 @@ def _v8_predict(image_bytes: bytes) -> dict:
         "probs": {"N": 1.0 - p_any, "D": p_any},
         "confidence": p_any if is_dr else 1.0 - p_any,
         "enhanced": False,
-        "grade": grade if SEVERITY_TRAINED else None,
-        "grade_label": GRADE_LABEL.get(grade, "Unknown") if SEVERITY_TRAINED else None,
-        "severity_available": SEVERITY_TRAINED,
+        "grade": grade if (GRADE_REPORTING and SEVERITY_TRAINED) else None,
+        "grade_label": (GRADE_LABEL.get(grade, "Unknown")
+                        if (GRADE_REPORTING and SEVERITY_TRAINED) else None),
+        "severity_available": GRADE_REPORTING and SEVERITY_TRAINED,
+        "grade_withheld_reason": (None if GRADE_REPORTING else
+                                  "ICDR grade is not reported: the severity heads cannot "
+                                  "rank grades above 2 (P(3>2)=0.47). Use the referral "
+                                  "decision, AUC 0.940."),
+        "referable": referred,
         "p_any_dr": p_any,
         "p_referable": p_ref,
         "referred": referred,
@@ -572,6 +599,7 @@ def model_info() -> dict:
             "weights_sha": {k: v["sha256"][:16] for k, v in V8_CAL["weights"].items()},
             "thresholds": {"any_dr": V8_THRESH[0], "referable": V8_THRESH[1]},
             "grade_rule": V8_CAL.get("grade_rule"),
+            "grade_reported": GRADE_REPORTING,
             "calibrated_on": V8_CAL.get("calibrated_on"),
             "measured": V8_CAL.get("measured"),
         })
