@@ -588,7 +588,11 @@ def model_info() -> dict:
     info = {
         "model_version": MODEL_VERSION,
         "build_marker": BUILD_MARKER,
-        "severity_available": SEVERITY_TRAINED,
+        # What the service actually reports, not what the weights could support.
+        # SEVERITY_TRAINED says a graded source was in the mix; it does not say
+        # the grade is fit to publish, and with GRADE_REPORTING off it is not.
+        "severity_available": GRADE_REPORTING and SEVERITY_TRAINED,
+        "severity_trained": SEVERITY_TRAINED,
         "trained_on": V6_SOURCES,
         "data_attribution": _attribution_for(V6_SOURCES),
         "mirror_tta": MIRROR_TTA,
