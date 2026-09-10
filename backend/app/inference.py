@@ -2,7 +2,7 @@ import json
 import os
 import hashlib
 from io import BytesIO
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 
 import torch
 import torch.nn as nn
@@ -133,6 +133,44 @@ V6_WEIGHTS = os.path.join(MODEL_DIR, "alati_dr_v6_ccby.pth")
 GRADE_REPORTING = str(os.getenv("GRADE_REPORTING", "0")).strip() == "1"
 V7B_WEIGHTS = os.path.join(MODEL_DIR, "alati_dr_v7b.pth")
 V8_CALIBRATION = os.path.join(MODEL_DIR, "v8_calibration.json")
+
+# v10 is two models with two jobs, and every training image in both is under a
+# licence confirmed at source (CC BY 4.0 or CC0, author-deposited or confirmed
+# in writing):
+#
+#   v9c  DR. v7b's recipe on Paraguay + RFMiD 2.0 + MMRDR - no RFMiD 1.0, whose
+#        licence is unconfirmed. Beats v8 on all four ordinal endpoints on the
+#        APTOS held-out half; severe-or-worse AUC 0.945 against 0.824.
+#   o1   "Other retinal abnormality": is a non-DR condition present? One logit,
+#        trained with DR eyes as negatives so it does not become a second DR
+#        detector. It exists because v9c's DR alarm cannot tell DR from other
+#        disease (it flags 47% of non-DR diseased eyes as DR and misses optic
+#        disc disease almost entirely). It does not name the condition.
+#
+# v9c's calibration is fitted on MMRDR's test split, not APTOS: APTOS's Kaggle
+# terms are non-commercial, so it is used only to evaluate.
+V9C_WEIGHTS = os.path.join(MODEL_DIR, "alati_dr_v9c.pth")
+O1_WEIGHTS = os.path.join(MODEL_DIR, "alati_other_o1.pth")
+V10_CALIBRATION = os.path.join(MODEL_DIR, "v10_calibration.json")
+
+# o1 is OFF by default. The 10 Sep release check found it does not generalise:
+# AUC 0.778 on RFMiD 1.0 (24.5% of other disease caught at its threshold), 0.531
+# on smartphone photos, and it fired on 18% of APTOS eyes without DR. With it off,
+# v10 is v9c alone plus the quality gate, and o1's weights need not be present.
+OTHER_ABNORMALITY = str(os.getenv("OTHER_ABNORMALITY", "0")).strip() == "1"
+
+# The quality gate refuses images that are not a gradable colour fundus photo
+# (black, blank, blurred, over/underexposed, OCT, noise ...). On by default for
+# v10; see quality.py and D:\alati-train\gate_eval.py for how it was measured.
+QUALITY_GATE = str(os.getenv("QUALITY_GATE", "1")).strip() == "1"
+try:
+    from . import quality as _quality
+    check_quality = _quality.check_quality
+except ImportError:     # loaded by path (evaluation scripts), not as a package
+    import importlib.util as _ilu
+    _qs = _ilu.spec_from_file_location("quality", os.path.join(BASE_DIR, "quality.py"))
+    _quality = _ilu.module_from_spec(_qs); _qs.loader.exec_module(_quality)
+    check_quality = _quality.check_quality
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 GRADE_LABEL = {0: "No diabetic retinopathy", 1: "Mild", 2: "Moderate",
@@ -158,6 +196,12 @@ SOURCE_ATTRIBUTION = {
     "paraguay": "Paraguay fundus dataset (Benitez et al.), CC BY 4.0, doi:10.5281/zenodo.4891308",
     "rfmid2": "RFMiD 2.0 (Panchal, Naik, Kokare, Pachade et al.), CC BY 4.0, doi:10.5281/zenodo.7505822",
     "rfmid": "RFMiD 1.0 (Pachade, Porwal, Kokare et al.), doi:10.3390/data6020014",
+    "mmrdr": "MMRDR (Wang, Li et al., Scientific Data 2026, doi:10.1038/s41597-026-07005-9), CC BY 4.0, doi:10.6084/m9.figshare.29423747.v2",
+    "edid": "Eye Disease Image Dataset (Sharmin, Rashid, Khatun, Hasan, Uddin; Data in Brief 2024), CC BY 4.0, doi:10.17632/s9bfhswzjb.1",
+    "chaksu": "Chakshu IMAGE (Kumar, Seelamantula et al., IISc/MAHE), CC BY 4.0, doi:10.6084/m9.figshare.20123135",
+    "acrima": "ACRIMA (Diaz-Pinto et al.), CC BY 4.0, doi:10.6084/m9.figshare.7613135",
+    "palm": "PALM (Fang, Li, Wu et al.), CC0, doi:10.6084/m9.figshare.21299148",
+    "pconamd": "PCO-nAMD (Liu, Tang, Liao et al.), CC BY 4.0, doi:10.6084/m9.figshare.32873501",
 }
 
 
@@ -360,6 +404,32 @@ V8_MODELS = {}
 V8_TRANSFORMS = {}
 V8_CAL = None
 V8_THRESH = []
+V10_DR = V10_DR_TF = V10_OTHER = V10_OTHER_TF = None
+V10_CAL = None
+V10_THRESH = []
+V10_OTHER_THRESH = None
+
+
+class OtherNet(nn.Module):
+    """o1: resnet50, one logit - P(a non-DR retinal condition is present)."""
+    def __init__(self):
+        super().__init__()
+        self.backbone = models.resnet50(weights=None)
+        self.backbone.fc = nn.Identity()
+        self.head = nn.Sequential(nn.Dropout(0.3), nn.Linear(2048, 1))
+
+    def forward(self, x):
+        return self.head(self.backbone(x)).squeeze(1)
+
+
+def _check_sha(path, want, what):
+    """Refuse to serve weights their calibration was not fitted against."""
+    got = _sha256_bytes(open(path, "rb").read())
+    if got != want:
+        raise RuntimeError(
+            f"{what} calibration/weights mismatch: {os.path.basename(path)} is sha256 "
+            f"{got[:16]}, calibration was fit against {want[:16]}. Refusing to start.")
+    return got
 # Whether the severity heads were actually trained. A model trained only on
 # binary-labelled data has P(grade>=2..4) masked out of its loss for every
 # positive, so those heads never see a positive example and emit noise - on
@@ -400,6 +470,28 @@ elif MODEL_VERSION == "v8":
         # is how the 9.2% failure would have happened.
         raise RuntimeError("V6_THRESH is set but MODEL_VERSION=v8; v8 takes its "
                            "thresholds from v8_calibration.json. Unset V6_THRESH.")
+elif MODEL_VERSION == "v10":
+    if os.getenv("V6_THRESH"):
+        raise RuntimeError("V6_THRESH is set but MODEL_VERSION=v10; v10 takes its "
+                           "thresholds from v10_calibration.json. Unset V6_THRESH.")
+    with open(V10_CALIBRATION, "r", encoding="utf-8") as fh:
+        V10_CAL = json.load(fh)
+    _check_sha(V9C_WEIGHTS, V10_CAL["weights"]["v9c"]["sha256"], "v9c")
+    V10_DR, V10_DR_TF, V6_SIZE, V6_SHA, V6_BYTES, _src = _load_ordinal(V9C_WEIGHTS)
+    if OTHER_ABNORMALITY:
+        _check_sha(O1_WEIGHTS, V10_CAL["weights"]["o1"]["sha256"], "o1")
+        _ck = torch.load(O1_WEIGHTS, map_location=DEVICE)
+        V10_OTHER = OtherNet().to(DEVICE)
+        V10_OTHER.load_state_dict(_ck["state"], strict=True)
+        V10_OTHER.eval()
+        V10_OTHER_TF = T.Compose([T.Resize((_ck.get("size", 512),) * 2), T.ToTensor(),
+                                  T.Normalize(IMAGENET_MEAN, IMAGENET_STD)])
+        del _ck
+        V10_OTHER_THRESH = float(V10_CAL["other_threshold"])
+    V10_THRESH = [float(V10_CAL["thresholds"][str(h)]) for h in range(4)]
+    # Credit only what is loaded: o1's sources are credited when o1 is on.
+    V6_SOURCES = sorted(set(_src) | (set(V10_CAL["trained_on"]["o1"]) if OTHER_ABNORMALITY else set()))
+    SEVERITY_TRAINED = bool(GRADED_SOURCES & set(_src)) or "mmrdr" in _src
 
 
 def _crop_to_disc(img: Image.Image) -> Image.Image:
@@ -577,6 +669,127 @@ def _v8_predict(image_bytes: bytes) -> dict:
     }
 
 
+def _v10_scores(img: Image.Image) -> Tuple[List[float], Optional[float]]:
+    """Calibrated, monotone P(grade >= 1..4) from v9c, and P(other) from o1 when it is on."""
+    x = V10_DR_TF(img).unsqueeze(0)
+    xb = torch.cat([x, torch.flip(x, dims=[3])], dim=0) if MIRROR_TTA else x
+    p_other = None
+    with torch.no_grad():
+        raw = torch.sigmoid(V10_DR(xb)).mean(dim=0).tolist()
+        if OTHER_ABNORMALITY:
+            o = V10_OTHER_TF(img).unsqueeze(0)
+            ob = torch.cat([o, torch.flip(o, dims=[3])], dim=0) if MIRROR_TTA else o
+            p_other = float(torch.sigmoid(V10_OTHER(ob)).mean())
+    out, cur = [], 1.0
+    for h in range(4):                  # P(>=1) >= P(>=2) >= P(>=3) >= P(>=4)
+        cur = min(cur, _pav(V10_CAL["isotonic"][str(h)], raw[h]))
+        out.append(cur)
+    return out, p_other
+
+
+def _v10_predict(image_bytes: bytes) -> dict:
+    """Same return shape as _v8_predict, plus the other-abnormality fields."""
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    if QUALITY_GATE:
+        ok, reason, qf = check_quality(img)
+        if not ok:
+            return _v10_ungradable(reason, qf)
+    img = _square_pad(_crop_to_disc(img))
+    p, p_other = _v10_scores(img)
+    p_any, p_ref = float(p[0]), float(p[1])
+
+    referred = p_ref >= V10_THRESH[1]
+    is_dr = (p_any >= V10_THRESH[0]) or referred
+    other = OTHER_ABNORMALITY and p_other >= V10_OTHER_THRESH
+    p_other_v = p_other if p_other is not None else 0.0
+    grade = int(min(4, max(0, round(sum(p)))))
+    if referred:
+        grade = max(grade, 2)
+
+    # The scan page reads these strings (main.py SCAN_HTML), so the wording is
+    # part of the contract: "not referable" must appear only when nothing in the
+    # eye warrants referral - an other-abnormality finding always does.
+    if is_dr and other:
+        display = ("Diabetic retinopathy — referable; other retinal abnormality also suspected"
+                   if referred else
+                   "Diabetic retinopathy with another retinal abnormality suspected — referable")
+    elif is_dr:
+        display = ("Diabetic retinopathy — referable" if referred
+                   else "Diabetic retinopathy — not referable")
+    elif other:
+        display = "Other retinal abnormality suspected — referable"
+    else:
+        display = translate_code("N")
+    if is_dr and GRADE_REPORTING and SEVERITY_TRAINED:
+        display += f" (grade {grade})"
+
+    code = "D" if is_dr else ("O" if other else "N")
+    reason = (f"v10: P(any DR)={p_any:.3f} vs {V10_THRESH[0]:.3f}, "
+              f"P(referable)={p_ref:.3f} vs {V10_THRESH[1]:.3f}")
+    if OTHER_ABNORMALITY:
+        reason += f", P(other)={p_other_v:.3f} vs {V10_OTHER_THRESH:.3f}"
+    return {
+        "phase": ACTIVE_PHASE,
+        "phase_name": PHASE_NAME,
+        "model_version": "v10",
+        "top_code": code,
+        "top_prob": p_any if is_dr else (p_other_v if other else 1.0 - p_any),
+        "top3": ([("D", p_any), ("O", p_other_v), ("N", 1.0 - max(p_any, p_other_v))]
+                 if OTHER_ABNORMALITY else [("D", p_any), ("N", 1.0 - p_any)]),
+        "final_code": code,
+        "final_reason": reason,
+        "translated": translate_code(code),
+        "display": display,
+        "probs": ({"N": 1.0 - p_any, "D": p_any, "O": p_other_v}
+                  if OTHER_ABNORMALITY else {"N": 1.0 - p_any, "D": p_any}),
+        "confidence": p_any if is_dr else (p_other_v if other else 1.0 - max(p_any, p_other_v)),
+        "gradable": True,
+        "enhanced": False,
+        "grade": grade if (GRADE_REPORTING and SEVERITY_TRAINED) else None,
+        "grade_label": (GRADE_LABEL.get(grade, "Unknown")
+                        if (GRADE_REPORTING and SEVERITY_TRAINED) else None),
+        "severity_available": GRADE_REPORTING and SEVERITY_TRAINED,
+        "grade_withheld_reason": (None if GRADE_REPORTING else
+                                  "ICDR grade is not reported: proliferative disease is still "
+                                  "mis-graded in most cases. Use the referral decision."),
+        "referable": bool(referred or other),
+        "dr_referable": referred,
+        "other_abnormality": other if OTHER_ABNORMALITY else None,
+        "p_any_dr": p_any,
+        "p_referable": p_ref,
+        "p_other": p_other,
+        "referred": bool(referred or other),
+        "ordinal": [float(v) for v in p],
+    }
+
+
+def _v10_ungradable(reason: str, qf: dict) -> dict:
+    """No diagnosis for an image the gate refused. Never "Normal", never a grade."""
+    return {
+        "phase": ACTIVE_PHASE,
+        "phase_name": PHASE_NAME,
+        "model_version": "v10",
+        "top_code": "U",
+        "top_prob": None,
+        "top3": [],
+        "final_code": "U",
+        "final_reason": f"quality gate: {reason}",
+        "translated": "Image not gradable",
+        # main.py stores this string and the scan page matches "not gradable"
+        "display": f"Image not gradable — {reason}",
+        "probs": {},
+        "confidence": None,
+        "enhanced": False,
+        "gradable": False,
+        "ungradable_reason": reason,
+        "quality": {k: round(float(v), 3) for k, v in qf.items()},
+        "grade": None, "grade_label": None, "severity_available": False,
+        "referable": None, "dr_referable": None, "other_abnormality": None,
+        "p_any_dr": None, "p_referable": None, "p_other": None, "referred": None,
+        "ordinal": None,
+    }
+
+
 def model_info() -> dict:
     """
     What is actually running. Unauthenticated on purpose: after the 4 September
@@ -606,6 +819,26 @@ def model_info() -> dict:
             "grade_reported": GRADE_REPORTING,
             "calibrated_on": V8_CAL.get("calibrated_on"),
             "measured": V8_CAL.get("measured"),
+        })
+    elif MODEL_VERSION == "v10":
+        _loaded = ["v9c"] + (["o1"] if OTHER_ABNORMALITY else [])
+        info.update({
+            "models": {"dr": "v9c", "other": "o1" if OTHER_ABNORMALITY else "off"},
+            "weights_sha": {k: V10_CAL["weights"][k]["sha256"][:16] for k in _loaded},
+            "thresholds": {"any_dr": V10_THRESH[0], "referable": V10_THRESH[1],
+                           **({"other_abnormality": V10_OTHER_THRESH} if OTHER_ABNORMALITY else {})},
+            "grade_rule": V10_CAL.get("grade_rule"),
+            "grade_reported": GRADE_REPORTING,
+            "calibrated_on": V10_CAL.get("calibrated_on"),
+            "other_abnormality": ("on - flags a non-diabetic retinal condition as present without "
+                                  "naming it" if OTHER_ABNORMALITY else
+                                  "off - failed external validation on 10 Sep 2026"),
+            "quality_gate": ({"on": True, **{k: getattr(_quality, k) for k in
+                              ("MIN_SIDE", "MIN_RETINA_FRAC", "MIN_LUM", "MAX_LUM",
+                               "GRAY_ABS_RED_BLUE", "MIN_SHARP", "MAX_SHARP")},
+                              "measured": V10_CAL.get("quality_gate_measured")}
+                             if QUALITY_GATE else {"on": False}),
+            "measured": V10_CAL.get("measured"),
         })
     elif MODEL_VERSION == "v6":
         info.update({"weights_sha": V6_SHA[:16] if V6_SHA else None,
@@ -729,6 +962,8 @@ def predict_raw(image_bytes: bytes, enhance: bool = False) -> dict:
         image_bytes: raw image bytes
         enhance: if True, apply retinal enhancement before inference
     """
+    if MODEL_VERSION == "v10":
+        return _v10_predict(image_bytes)
     if MODEL_VERSION == "v8":
         return _v8_predict(image_bytes)
     if MODEL_VERSION == "v6":
@@ -792,6 +1027,11 @@ def predict_debug(image_bytes: bytes, enhance: bool = False) -> dict:
     Full debug output including all metadata.
     """
     raw = predict_raw(image_bytes, enhance=enhance)
+    if MODEL_VERSION == "v10":
+        return {"build_marker": BUILD_MARKER, "load_mode": "strict",
+                "active_variant": "v9c DR" + (" + o1 other-abnormality" if OTHER_ABNORMALITY else "")
+                                  + (" + quality gate" if QUALITY_GATE else ""),
+                **model_info(), **raw}
     if MODEL_VERSION == "v8":
         return {"build_marker": BUILD_MARKER, "load_mode": "strict",
                 "active_variant": "v6+v7b calibrated ensemble", **model_info(), **raw}

@@ -774,13 +774,29 @@ SCAN_HTML = """<!DOCTYPE html>
           // time and would understate urgency on the worst eyes.
           const gradeItem = document.getElementById('result-grade-item');
           const isDR = /diabetic retinopathy/i.test(dx);
-          const notRef = /not referable/i.test(dx);
-          if (isDR) {
+          // v10 adds a second model that flags a non-DR retinal condition without
+          // naming it. That finding is always a referral.
+          const isOther = /other retinal abnormality|another retinal abnormality/i.test(dx);
+          const notRef = /not referable/i.test(dx) && !isOther;
+          // The quality gate refused the photo: no diagnosis was made. This must
+          // never read as a normal result.
+          const ungradable = /not gradable/i.test(dx);
+          if (ungradable) {
+            document.getElementById('result-grade').textContent = 'No result — retake the photo';
+            document.getElementById('result-grade-note').textContent =
+              'The photo could not be read, so no diagnosis was made. This is not a normal result. Retake a clear colour fundus photo and scan again.';
+            gradeItem.style.display = '';
+          } else if (isDR || isOther) {
             document.getElementById('result-grade').textContent =
               notRef ? 'Not referable at this time' : 'Referable';
-            document.getElementById('result-grade-note').textContent = notRef
+            let note = notRef
               ? 'Disease is present but below the referral threshold. Monitor and rescreen; this is not a normal result.'
               : 'Ophthalmology review recommended. Severity is not graded — assess the eye clinically.';
+            if (isOther) {
+              note = 'A retinal condition other than diabetic retinopathy may be present. It is not identified by this tool — ophthalmology review recommended.'
+                + (isDR ? ' Diabetic retinopathy is also suspected.' : '');
+            }
+            document.getElementById('result-grade-note').textContent = note;
             gradeItem.style.display = '';
           } else {
             gradeItem.style.display = 'none';
