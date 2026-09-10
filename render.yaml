@@ -41,11 +41,7 @@ services:
       # MODEL_VERSION=v8: its weights and calibration stay in the image.
       - key: MODEL_VERSION
         value: v10
-      # o1, the "other retinal abnormality" model, failed external validation and
-      # is off. Its weights are not shipped; setting this to 1 without them
-      # refuses to start rather than serving without it.
-      - key: OTHER_ABNORMALITY
-        value: "0"
+      # Refuse unreadable photos (black, tiny, grayscale, noise) before grading.
       - key: QUALITY_GATE
         value: "1"
 

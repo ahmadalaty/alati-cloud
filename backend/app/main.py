@@ -40,8 +40,6 @@ from .inference import (
     predict_diagnosis,
     predict_debug,
     model_info,
-    BUILD_MARKER as INF_MARKER,
-    ACTIVE_VARIANT,
 )
 from .report import create_pdf_report
 
@@ -143,13 +141,21 @@ LOGIN_HTML = """<!DOCTYPE html>
   <title>Alati - Sign In</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto; background: linear-gradient(135deg, #0c447c 0%, #185fa5 50%, #0f6e56 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto; background: linear-gradient(135deg, #0c447c 0%, #185fa5 50%, #0f6e56 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem 2rem 4rem; }
     
     .container { background: white; border-radius: 12px; max-width: 440px; width: 100%; overflow: hidden; box-shadow: 0 12px 32px rgba(0,0,0,0.12); }
     .header { background: linear-gradient(135deg, #185fa5 0%, #0f6e56 100%); padding: 2rem; color: white; text-align: center; }
     .header-title { font-size: 36px; font-weight: 500; margin-bottom: 8px; }
     .header-subtitle { font-size: 14px; opacity: 0.95; margin: 0; }
-    
+
+    /* Measured performance (v10, retrospective, see /model_info) */
+    .stats { margin-top: 1.25rem; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: left; }
+    .stat { background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.22); border-radius: 8px; padding: 10px 12px; }
+    .stat-label { font-size: 10.5px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; opacity: 0.9; margin-bottom: 6px; line-height: 1.3; }
+    .stat-nums { display: grid; gap: 3px; font-size: 12px; }
+    .stat-nums b { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; margin-right: 3px; }
+    .stat-note { grid-column: 1 / -1; font-size: 10.5px; line-height: 1.45; opacity: 0.85; }
+
     .form-container { padding: 2.5rem; }
     .tabs { display: flex; gap: 0; margin-bottom: 2rem; border-bottom: 2px solid #e0e0e0; }
     .tab-btn { flex: 1; padding: 14px; background: none; border: none; border-bottom: 3px solid transparent; color: #888780; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.3s; }
@@ -214,11 +220,13 @@ LOGIN_HTML = """<!DOCTYPE html>
     html, body { overflow-x: hidden; -webkit-text-size-adjust: 100%; }
     
     @media (max-width: 600px) {
-      body { padding: 1rem; min-height: 100vh; }
+      body { padding: 1rem 1rem 4rem; min-height: 100vh; }  /* room for the fixed legal footer */
       .container { max-width: 100%; border-radius: 10px; }
       .header { padding: 1.5rem 1rem; }
       .header-title { font-size: 26px; }
       .header-subtitle { font-size: 13px; }
+      .stat { padding: 9px 10px; }
+      .stat-nums b { font-size: 17px; }
       .form-container { padding: 1.5rem 1.25rem; }
       .tabs { margin-bottom: 1.5rem; }
       .tab-btn { padding: 12px 8px; font-size: 13px; }
@@ -239,7 +247,18 @@ LOGIN_HTML = """<!DOCTYPE html>
   <div class="container">
     <div class="header">
       <div class="header-title">Alati</div>
-      <p class="header-subtitle">AI-powered retinal disease detection</p>
+      <p class="header-subtitle">AI-assisted diabetic retinopathy screening</p>
+      <div class="stats" aria-label="Measured performance">
+        <div class="stat">
+          <div class="stat-label">Referable diabetic retinopathy</div>
+          <div class="stat-nums"><span><b>99.4%</b> sensitivity</span><span><b>81.7%</b> specificity</span></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Any diabetic retinopathy</div>
+          <div class="stat-nums"><span><b>99.8%</b> sensitivity</span><span><b>90.4%</b> specificity</span></div>
+        </div>
+        <p class="stat-note">Retrospective evaluation on 3,662 retinal photographs from an independent public dataset not used in development (95% CI: referable 98.9–99.7% / 80.0–83.3%; any DR 99.5–99.9% / 89.0–91.7%). Standard fundus cameras; smartphone cameras not validated. A screening aid, not a replacement for an eye examination.</p>
+      </div>
     </div>
 
     <div class="form-container">
@@ -767,17 +786,13 @@ SCAN_HTML = """<!DOCTYPE html>
           const dx = data.left_diagnosis || data.right_diagnosis || 'Analysis complete';
           document.getElementById('result-diagnosis').textContent = dx;
 
-          // Referral, not severity. The model reports whether the eye needs an
-          // ophthalmologist, which it does well (AUC 0.940, 97.9% sensitivity).
-          // It does NOT report an ICDR grade: its severity heads cannot rank
-          // grades above 2, so a grade shown here would be wrong most of the
-          // time and would understate urgency on the worst eyes.
+          // Referral, not severity: the model reports whether the eye needs an
+          // ophthalmologist (99.4% sensitivity for referable DR). It does NOT
+          // report an ICDR grade - proliferative disease is still mis-graded in
+          // most cases, and a wrong grade would understate urgency.
           const gradeItem = document.getElementById('result-grade-item');
           const isDR = /diabetic retinopathy/i.test(dx);
-          // v10 adds a second model that flags a non-DR retinal condition without
-          // naming it. That finding is always a referral.
-          const isOther = /other retinal abnormality|another retinal abnormality/i.test(dx);
-          const notRef = /not referable/i.test(dx) && !isOther;
+          const notRef = /not referable/i.test(dx);
           // The quality gate refused the photo: no diagnosis was made. This must
           // never read as a normal result.
           const ungradable = /not gradable/i.test(dx);
@@ -786,17 +801,12 @@ SCAN_HTML = """<!DOCTYPE html>
             document.getElementById('result-grade-note').textContent =
               'The photo could not be read, so no diagnosis was made. This is not a normal result. Retake a clear colour fundus photo and scan again.';
             gradeItem.style.display = '';
-          } else if (isDR || isOther) {
+          } else if (isDR) {
             document.getElementById('result-grade').textContent =
               notRef ? 'Not referable at this time' : 'Referable';
-            let note = notRef
+            document.getElementById('result-grade-note').textContent = notRef
               ? 'Disease is present but below the referral threshold. Monitor and rescreen; this is not a normal result.'
               : 'Ophthalmology review recommended. Severity is not graded — assess the eye clinically.';
-            if (isOther) {
-              note = 'A retinal condition other than diabetic retinopathy may be present. It is not identified by this tool — ophthalmology review recommended.'
-                + (isDR ? ' Diabetic retinopathy is also suspected.' : '');
-            }
-            document.getElementById('result-grade-note').textContent = note;
             gradeItem.style.display = '';
           } else {
             gradeItem.style.display = 'none';
