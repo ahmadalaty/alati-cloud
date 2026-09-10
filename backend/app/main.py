@@ -91,7 +91,7 @@ def send_verification_email(to_email: str, token: str) -> bool:
       <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.08);">
         <div style="background: linear-gradient(135deg, #185fa5 0%, #0f6e56 100%); padding: 2rem; color: white; text-align: center;">
           <h1 style="margin: 0; font-size: 28px; font-weight: 500;">Welcome to Alati</h1>
-          <p style="margin: 8px 0 0; opacity: 0.95; font-size: 14px;">AI-powered retinal disease detection</p>
+          <p style="margin: 8px 0 0; opacity: 0.95; font-size: 14px;">AI-assisted diabetic retinopathy screening</p>
         </div>
         <div style="padding: 2rem;">
           <p style="font-size: 16px; color: #2c2c2a; line-height: 1.6;">Hi,</p>
@@ -2012,7 +2012,7 @@ def _legal_page_html(title: str, body_html: str) -> str:
   <div class="card">
     <div class="header">
       <h1>{title}</h1>
-      <p>Alati · AI-powered retinal disease detection · Last updated {LEGAL_LAST_UPDATED}</p>
+      <p>Alati · AI-assisted diabetic retinopathy screening · Last updated {LEGAL_LAST_UPDATED}</p>
     </div>
     <div class="content">
       {body_html}
