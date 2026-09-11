@@ -396,6 +396,7 @@ LOGIN_HTML = """<!DOCTYPE html>
     <a href="/legal/terms">Terms of Service</a><span>·</span>
     <a href="/legal/privacy">Privacy Notice</a><span>·</span>
     <a href="/legal/refund-policy">Refund Policy</a><span>·</span>
+    <a href="/pricing">Pricing</a><span>·</span>
     <a href="mailto:ahmadalaty@gmail.com">Contact</a>
   </div>
 
@@ -2065,6 +2066,7 @@ def _legal_page_html(title: str, body_html: str) -> str:
       <a href="/legal/terms">Terms of Service</a>
       <a href="/legal/privacy">Privacy Notice</a>
       <a href="/legal/refund-policy">Refund Policy</a>
+      <a href="/pricing">Pricing</a>
       <a href="/login">← Back to Alati</a>
     </div>
   </div>
@@ -2085,7 +2087,7 @@ TERMS_OF_SERVICE_HTML = _legal_page_html("Terms of Service", f"""
   <p>You are responsible for maintaining the confidentiality of your account credentials and for all activity under your account. Notify us promptly of any unauthorized use.</p>
 
   <h2>4. Subscription Plans &amp; Billing</h2>
-  <p>Alati offers a free tier with a limited number of scans per day, and a paid Premium subscription (currently $29.99/month) offering a higher daily scan limit. Premium subscriptions are billed on a recurring monthly basis through our payment processor, Paddle, until cancelled. See our <a href="/legal/refund-policy">Refund Policy</a> for cancellation and refund terms.</p>
+  <p>Alati offers a free tier with a limited number of scans per day, and a paid Premium subscription (currently $29.99/month) offering a higher daily scan limit; see <a href="/pricing">Pricing</a>. Premium subscriptions are billed on a recurring monthly basis through our payment processor, Paddle, until cancelled. See our <a href="/legal/refund-policy">Refund Policy</a> for cancellation and refund terms.</p>
 
   <h2>5. Acceptable Use</h2>
   <p>You agree not to misuse the Service, including by attempting to circumvent usage limits, uploading content you do not have the right to submit, or using the Service in a manner inconsistent with the eligibility and clinical-use restrictions above.</p>
@@ -2188,6 +2190,37 @@ async def legal_privacy():
 @app.get("/legal/refund-policy", response_class=HTMLResponse)
 async def legal_refund_policy():
     return REFUND_POLICY_HTML
+
+
+PRICING_HTML = _legal_page_html("Pricing", f"""
+  <p>Alati is AI-assisted diabetic retinopathy screening software for licensed medical professionals. Upload a retinal photograph and get a referable / not-referable result in seconds.</p>
+
+  <h2>Free — $0</h2>
+  <ul>
+    <li>5 scans per day</li>
+    <li>Referable diabetic retinopathy result for each photo</li>
+    <li>Automatic image-quality check</li>
+    <li>PDF report and scan history</li>
+  </ul>
+
+  <h2>Premium — $29.99 per month</h2>
+  <ul>
+    <li>50 scans per day</li>
+    <li>Everything in Free</li>
+    <li>Billed monthly until cancelled; cancel anytime from your account page</li>
+  </ul>
+
+  <h2>Billing</h2>
+  <p>Prices are in US dollars. Premium is billed by Paddle.com, our merchant of record, and tax may apply depending on your location. To upgrade, create a free account and choose "Upgrade to Premium" on your account page. Refunds are covered by our <a href="/legal/refund-policy">Refund Policy</a>; use of the Service is governed by our <a href="/legal/terms">Terms of Service</a> and <a href="/legal/privacy">Privacy Notice</a>.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about pricing or billing: <a href="mailto:{LEGAL_CONTACT_EMAIL}">{LEGAL_CONTACT_EMAIL}</a>.</p>
+""")
+
+
+@app.get("/pricing", response_class=HTMLResponse)
+async def pricing_page():
+    return PRICING_HTML
 
 
 @app.post("/auth/login", response_model=TokenResponse)
