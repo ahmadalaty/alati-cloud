@@ -191,6 +191,20 @@ LOGIN_HTML = """<!DOCTYPE html>
     .consent-row input[type="checkbox"] { width: 18px; height: 18px; flex-shrink: 0; margin-top: 1px; cursor: pointer; accent-color: #185fa5; }
     .consent-row label { cursor: pointer; }
 
+    /* Plans / pricing */
+    .plans { border-top: 1px solid #e0e0e0; padding: 1.75rem 2.5rem 2rem; background: #fafaf8; }
+    .plans h3 { font-size: 12px; font-weight: 600; color: #2c2c2a; text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 12px; }
+    .plan-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .plan { background: white; border: 1.5px solid #e0e0e0; border-radius: 8px; padding: 12px 14px; }
+    .plan.premium { border-color: #185fa5; }
+    .plan-name { font-size: 13px; font-weight: 600; color: #185fa5; }
+    .plan-price { font-size: 22px; font-weight: 600; color: #2c2c2a; margin: 2px 0 8px; font-variant-numeric: tabular-nums; }
+    .plan-price span { font-size: 12px; font-weight: 400; color: #888780; }
+    .plan ul { list-style: none; font-size: 12px; color: #444441; line-height: 1.6; }
+    .plan li::before { content: "✓ "; color: #0f6e56; font-weight: 600; }
+    .plans-note { font-size: 11.5px; color: #888780; line-height: 1.5; margin-top: 10px; }
+    .plans-note a { color: #185fa5; }
+
     /* Legal footer */
     .legal-footer { position: fixed; left: 0; right: 0; bottom: 0; padding: 14px; text-align: center; font-size: 12px; }
     .legal-footer a { color: rgba(255,255,255,0.85); text-decoration: none; margin: 0 8px; }
@@ -237,6 +251,7 @@ LOGIN_HTML = """<!DOCTYPE html>
       .form-options { font-size: 12px; flex-wrap: wrap; gap: 8px; }
       .signup-link { font-size: 12px; }
       .info-box { font-size: 11px; padding: 10px; }
+      .plans { padding: 1.5rem 1.25rem; }
       .banned-banner, .verify-banner, .success-banner { padding: 12px; }
       .banned-banner .title, .verify-banner .title, .success-banner .title { font-size: 13px; }
       .banned-banner .text, .verify-banner .text, .success-banner .text { font-size: 12px; }
@@ -349,12 +364,39 @@ LOGIN_HTML = """<!DOCTYPE html>
         <p class="signup-link">Already have an account? <button onclick="switchTab('login')">Sign in</button></p>
       </div>
     </div>
+
+    <div class="plans" id="pricing">
+      <h3>Plans</h3>
+      <div class="plan-grid">
+        <div class="plan">
+          <div class="plan-name">Free</div>
+          <div class="plan-price">$0</div>
+          <ul>
+            <li>5 scans per day</li>
+            <li>Referable DR result per photo</li>
+            <li>Image-quality check</li>
+            <li>PDF report and scan history</li>
+          </ul>
+        </div>
+        <div class="plan premium">
+          <div class="plan-name">Premium</div>
+          <div class="plan-price">$29.99<span> / month</span></div>
+          <ul>
+            <li>50 scans per day</li>
+            <li>Everything in Free</li>
+            <li>Cancel anytime</li>
+          </ul>
+        </div>
+      </div>
+      <p class="plans-note">Upgrade from your account page after signing in. Premium is billed monthly in USD by Paddle, our merchant of record; tax may apply depending on your location. Questions: <a href="mailto:ahmadalaty@gmail.com">ahmadalaty@gmail.com</a></p>
+    </div>
   </div>
 
   <div class="legal-footer">
     <a href="/legal/terms">Terms of Service</a><span>·</span>
     <a href="/legal/privacy">Privacy Notice</a><span>·</span>
-    <a href="/legal/refund-policy">Refund Policy</a>
+    <a href="/legal/refund-policy">Refund Policy</a><span>·</span>
+    <a href="mailto:ahmadalaty@gmail.com">Contact</a>
   </div>
 
   <script>
@@ -1983,8 +2025,10 @@ def _verification_result_page(success: bool, message: str) -> str:
 </body></html>"""
 
 
-LEGAL_LAST_UPDATED = "August 19, 2026"
+LEGAL_LAST_UPDATED = "September 11, 2026"
 LEGAL_CONTACT_EMAIL = "ahmadalaty@gmail.com"
+# Must match the seller name given to Paddle in account verification.
+LEGAL_OPERATOR = "Ahmad Alalati, a sole proprietor"
 
 
 def _legal_page_html(title: str, body_html: str) -> str:
@@ -2029,6 +2073,7 @@ def _legal_page_html(title: str, body_html: str) -> str:
 
 TERMS_OF_SERVICE_HTML = _legal_page_html("Terms of Service", f"""
   <p>These Terms of Service ("Terms") govern your access to and use of Alati (the "Service"), an AI-based screening aid for diabetic retinopathy. By creating an account or using the Service, you agree to these Terms.</p>
+  <p>Alati is operated by {LEGAL_OPERATOR} ("we", "us", "our"). Our order process is conducted by our online reseller Paddle.com, which is the merchant of record for all our orders and handles billing, payment, and order-related customer service inquiries and returns.</p>
 
   <h2>1. Eligibility</h2>
   <p>The Service is intended solely for use by licensed medical professionals acting within their own clinical judgment and scope of practice. By registering, you confirm that you are a licensed medical professional and that you are using the Service accordingly.</p>
@@ -2046,13 +2091,13 @@ TERMS_OF_SERVICE_HTML = _legal_page_html("Terms of Service", f"""
   <p>You agree not to misuse the Service, including by attempting to circumvent usage limits, uploading content you do not have the right to submit, or using the Service in a manner inconsistent with the eligibility and clinical-use restrictions above.</p>
 
   <h2>6. Intellectual Property</h2>
-  <p>The Service, including its underlying software and models, is owned by Alati and its licensors. These Terms do not grant you any rights to our intellectual property beyond the limited right to use the Service as intended.</p>
+  <p>The Service, including its underlying software and models, is owned by us and our licensors. These Terms do not grant you any rights to our intellectual property beyond the limited right to use the Service as intended.</p>
 
   <h2>7. Disclaimer of Warranties</h2>
   <p>The Service is provided "as is" and "as available," without warranties of any kind, express or implied, including as to accuracy, reliability, or fitness for a particular purpose — consistent with its current pre-approval / research-use status.</p>
 
   <h2>8. Limitation of Liability</h2>
-  <p>To the maximum extent permitted by law, Alati shall not be liable for any indirect, incidental, or consequential damages, or for any clinical decisions made using the Service's output. By using the Service, you accept full responsibility for clinical decisions made in your practice, as set out in the sign-up disclaimer.</p>
+  <p>To the maximum extent permitted by law, we shall not be liable for any indirect, incidental, or consequential damages, or for any clinical decisions made using the Service's output. By using the Service, you accept full responsibility for clinical decisions made in your practice, as set out in the sign-up disclaimer.</p>
 
   <h2>9. Termination</h2>
   <p>We may suspend or terminate your account for violation of these Terms. You may stop using the Service and cancel your subscription at any time.</p>
