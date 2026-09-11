@@ -80,6 +80,11 @@ PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
 PADDLE_CLIENT_TOKEN = os.getenv("PADDLE_CLIENT_TOKEN", "").strip()
 PADDLE_PRICE_ID_PREMIUM = os.getenv("PADDLE_PRICE_ID_PREMIUM", "").strip()
 PADDLE_ENV = os.getenv("PADDLE_ENV", "sandbox").strip().lower()  # 'sandbox' or 'production'
+# Paddle-hosted portal (Paddle dashboard > Customer Portal) where subscribers
+# cancel, update their card and download invoices.
+PADDLE_CUSTOMER_PORTAL_URL = os.getenv(
+    "PADDLE_CUSTOMER_PORTAL_URL", "https://customer-portal.paddle.com/cpl_01m0a41008xtamfn2akzr6sxsn"
+).strip()
 
 # App URL (used in verification email links).
 APP_URL = os.getenv("APP_URL", "").rstrip("/") or "https://alati.nabeeh.health"
@@ -1530,6 +1535,10 @@ ACCOUNT_HTML = """<!DOCTYPE html>
         <div class="card-value" id="plan-value">-</div>
         <div class="card-sub" id="plan-sub"></div>
         <button class="header-btn" id="upgrade-btn" style="display:none; margin-top: 10px; background: linear-gradient(135deg, #0f6e56 0%, #085041 100%); border-color: transparent; color: white;" onclick="openUpgradeCheckout()">⭐ Upgrade to Premium</button>
+        <div id="manage-sub" style="display:none; margin-top: 10px;">
+          <a class="header-btn" id="manage-sub-btn" href="#" target="_blank" rel="noopener" style="display:inline-block; background: white; color: #185fa5; border-color: #185fa5;">Manage or cancel subscription</a>
+          <div class="card-sub" id="manage-sub-note" style="font-size: 12px; line-height: 1.5;"></div>
+        </div>
       </div>
     </div>
 
@@ -1648,6 +1657,21 @@ ACCOUNT_HTML = """<!DOCTYPE html>
           ? `${u.usage_limit === -1 ? 'Unlimited' : u.usage_limit} scans/day`
           : `${billingConfig ? billingConfig.free_daily_limit : 5} scans/day`;
         document.getElementById('upgrade-btn').style.display = (isPremium || isCustom) ? 'none' : 'inline-block';
+
+        // Self-service billing: Paddle's hosted customer portal handles cancelling,
+        // card changes and invoices. The customer signs in there with the email
+        // they paid with, so there is nothing to hand over from our side.
+        const portalUrl = billingConfig && billingConfig.customer_portal_url;
+        const manage = document.getElementById('manage-sub');
+        if (u.has_subscription && portalUrl) {
+          document.getElementById('manage-sub-btn').href = portalUrl;
+          document.getElementById('manage-sub-note').textContent = isPremium
+            ? `Opens Paddle's customer portal. Sign in with ${u.email}. If you cancel, Premium stays active until the end of the period you've paid for.`
+            : `Opens Paddle's customer portal, where you can view past invoices. Sign in with ${u.email}.`;
+          manage.style.display = 'block';
+        } else {
+          manage.style.display = 'none';
+        }
 
         // Status pill
         const pill = document.getElementById('status-pill');
@@ -2289,6 +2313,7 @@ def billing_config():
         "client_token": PADDLE_CLIENT_TOKEN,
         "price_id": PADDLE_PRICE_ID_PREMIUM,
         "environment": PADDLE_ENV,
+        "customer_portal_url": PADDLE_CUSTOMER_PORTAL_URL,
         "free_daily_limit": FREE_DAILY_LIMIT,
         "premium_daily_limit": PREMIUM_DAILY_LIMIT,
     }
@@ -2400,6 +2425,7 @@ def get_my_info(req: Request, db: Session = Depends(get_db)):
         "usage_limit": getattr(user, 'usage_limit', -1),
         "tier": getattr(user, 'tier', 'free') or 'free',
         "subscription_status": getattr(user, 'subscription_status', None),
+        "has_subscription": bool(getattr(user, 'paddle_subscription_id', None)),
         "is_admin": is_admin,
     }
 
