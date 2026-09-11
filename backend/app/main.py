@@ -2165,7 +2165,7 @@ REFUND_POLICY_HTML = _legal_page_html("Refund Policy", f"""
   <p>You may cancel your Premium subscription at any time from your account page. Cancelling stops future renewals; you'll keep Premium access through the end of the billing period you already paid for.</p>
 
   <h2>4. Refunds</h2>
-  <p>If you're not satisfied, you may request a full refund within 7 days of a Premium charge, provided you have used fewer than 10 scans during the billing period being refunded. Contact us at the email below to request one. Refund requests outside this window, or above the usage threshold, are considered on a case-by-case basis. Approved refunds are processed back to your original payment method via Paddle.</p>
+  <p>If you're not satisfied, you may request a full refund within 14 days of a Premium charge. Contact us at the email below to request one. Refund requests outside this window are considered on a case-by-case basis. Approved refunds are processed back to your original payment method via Paddle.</p>
 
   <h2>5. How to Request a Refund</h2>
   <p>Email <a href="mailto:{LEGAL_CONTACT_EMAIL}">{LEGAL_CONTACT_EMAIL}</a> with your account email and the date of the charge you'd like refunded.</p>
