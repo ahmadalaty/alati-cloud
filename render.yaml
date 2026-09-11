@@ -21,7 +21,7 @@ services:
       # Public URL of this service — used to build links in emails (e.g.
       # email verification). Must match the actual live domain below.
       - key: APP_URL
-        value: https://alati-api.onrender.com
+        value: https://alati.nabeeh.health
 
       # Model selection.
       #

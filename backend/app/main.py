@@ -8,7 +8,7 @@ import sys
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text, or_
 from datetime import datetime
@@ -47,6 +47,28 @@ app = FastAPI(title="Alati Cloud - Eye Disease Screening")
 Base.metadata.create_all(bind=engine)
 
 
+# The service moved from its Render address to alati.nabeeh.health. Pages
+# requested at the old address redirect to the same page on the new one. API
+# calls and the Paddle webhook are left alone: Paddle still posts to the old
+# URL, and a redirect would drop the POST body.
+OLD_HOST = "alati-api.onrender.com"
+CANONICAL_HOST = "alati.nabeeh.health"
+_REDIRECT_PAGES = ("/", "/login", "/scan", "/dashboard", "/account", "/pricing")
+
+
+@app.middleware("http")
+async def redirect_old_host(request: Request, call_next):
+    host = request.headers.get("host", "").split(":")[0].lower()
+    path = request.url.path
+    if (host == OLD_HOST and request.method in ("GET", "HEAD")
+            and (path in _REDIRECT_PAGES or path.startswith("/legal/"))):
+        target = f"https://{CANONICAL_HOST}{path}"
+        if request.url.query:
+            target += f"?{request.url.query}"
+        return RedirectResponse(target, status_code=301)
+    return await call_next(request)
+
+
 # ============ APP CONFIG (env-driven) ============
 
 # Daily scan limits per tier. Free/DEFAULT_USAGE_LIMIT kept as a fallback for existing Render configs.
@@ -60,7 +82,7 @@ PADDLE_PRICE_ID_PREMIUM = os.getenv("PADDLE_PRICE_ID_PREMIUM", "").strip()
 PADDLE_ENV = os.getenv("PADDLE_ENV", "sandbox").strip().lower()  # 'sandbox' or 'production'
 
 # App URL (used in verification email links).
-APP_URL = os.getenv("APP_URL", "").rstrip("/") or "https://alati-api.onrender.com"
+APP_URL = os.getenv("APP_URL", "").rstrip("/") or "https://alati.nabeeh.health"
 
 # SMTP config (if not set, email verification is disabled — registration still works)
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
@@ -397,7 +419,8 @@ LOGIN_HTML = """<!DOCTYPE html>
     <a href="/legal/privacy">Privacy Notice</a><span>·</span>
     <a href="/legal/refund-policy">Refund Policy</a><span>·</span>
     <a href="/pricing">Pricing</a><span>·</span>
-    <a href="mailto:ahmadalaty@gmail.com">Contact</a>
+    <a href="mailto:ahmadalaty@gmail.com">Contact</a><span>·</span>
+    <a href="https://nabeeh.health">Nabeeh</a>
   </div>
 
   <script>
@@ -2075,7 +2098,7 @@ def _legal_page_html(title: str, body_html: str) -> str:
 
 TERMS_OF_SERVICE_HTML = _legal_page_html("Terms of Service", f"""
   <p>These Terms of Service ("Terms") govern your access to and use of Alati (the "Service"), an AI-based screening aid for diabetic retinopathy. By creating an account or using the Service, you agree to these Terms.</p>
-  <p>Alati is operated by {LEGAL_OPERATOR} ("we", "us", "our"). Our order process is conducted by our online reseller Paddle.com, which is the merchant of record for all our orders and handles billing, payment, and order-related customer service inquiries and returns.</p>
+  <p>Alati is a <a href="https://nabeeh.health">Nabeeh</a> product operated by {LEGAL_OPERATOR} ("we", "us", "our"). Our order process is conducted by our online reseller Paddle.com, which is the merchant of record for all our orders and handles billing, payment, and order-related customer service inquiries and returns.</p>
 
   <h2>1. Eligibility</h2>
   <p>The Service is intended solely for use by licensed medical professionals acting within their own clinical judgment and scope of practice. By registering, you confirm that you are a licensed medical professional and that you are using the Service accordingly.</p>
