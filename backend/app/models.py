@@ -8,6 +8,11 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
+    full_name = Column(String(120), nullable=True)
+
+    # Password reset: only a hash of the emailed token is stored.
+    reset_token_hash = Column(String(64), nullable=True, index=True)
+    reset_token_expires = Column(DateTime(timezone=True), nullable=True)
 
     # User management fields
     is_banned = Column(Integer, default=0, nullable=False)  # 1=banned, 0=active
