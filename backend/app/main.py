@@ -811,7 +811,6 @@ SCAN_HTML = """<!DOCTYPE html>
       <div class="header-btns">
         <a class="header-btn" id="admin-btn" href="/dashboard" style="display: none;">Admin dashboard</a>
         <a class="header-btn" href="/account">My account</a>
-        <a class="header-btn" href="/ecg" target="_blank" rel="noopener" title="Opens the ECG reader in a new tab. It is separate from the retinal screening model.">ECG reader</a>
         <button type="button" class="header-btn" onclick="logout()">Sign out</button>
       </div>
     </div>
@@ -857,7 +856,7 @@ SCAN_HTML = """<!DOCTYPE html>
         </div>
         <input type="file" id="file-a" accept="image/*" hidden>
         <input type="file" id="file-b" accept="image/*" hidden>
-        <p class="guidance">Upload the original colour fundus photograph from a standard fundus camera. Screenshots and downloaded copies are often too small: when the retina is under about 1,000 pixels across, Alati can still flag referable disease but will not rule it out. Smartphone fundus cameras and ultra-widefield images are not yet validated. Photos are analysed in memory and are not stored.</p>
+        <p class="guidance">Upload the original colour fundus photograph from a standard fundus camera. Screenshots, downloaded copies and photos sent through messaging apps are often too small or too compressed: Alati can still flag referable disease in them, but will not rule it out. Smartphone fundus cameras and ultra-widefield images are not yet validated. Photos are analysed in memory and are not stored.</p>
       </div>
 
       <div class="buttons">
@@ -1238,7 +1237,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
       <div class="header-btns">
         <button class="header-btn" onclick="goToScan()">Retinal scan</button>
-        <a class="header-btn" href="/ecg" target="_blank" rel="noopener" style="text-decoration:none;" title="Opens the ECG reader in a new tab. It is separate from the retinal screening model.">ECG reader</a>
         <button class="header-btn" onclick="logout()">Sign out</button>
       </div>
     </div>
@@ -1745,7 +1743,6 @@ ACCOUNT_HTML = """<!DOCTYPE html>
       <div class="header-btns">
         <a class="header-btn" id="admin-btn" href="/dashboard" style="display: none;">Admin dashboard</a>
         <a class="header-btn" id="scan-btn" href="/scan">New scan</a>
-        <a class="header-btn" href="/ecg" target="_blank" rel="noopener" style="text-decoration:none;" title="Opens the ECG reader in a new tab. It is separate from the retinal screening model.">ECG reader</a>
         <button class="header-btn" onclick="logout()">Sign out</button>
       </div>
     </div>
@@ -2150,10 +2147,17 @@ async def account_page():
 _ECG_PAGE = os.path.join(os.path.dirname(__file__), "static", "ecg.html")
 
 
+# Hidden since 20 Nov 2026 at the owner's request: no links point here and the
+# route answers 404 unless ECG_ENABLED=1 is set in the environment. The page
+# gives direct treatment instructions and is separate from the validated
+# retinal model, so it stays off until it is reviewed.
+ECG_ENABLED = os.getenv("ECG_ENABLED", "0").strip() == "1"
+
+
 @app.get("/ecg")
 async def ecg_page():
-    if not os.path.exists(_ECG_PAGE):
-        raise HTTPException(status_code=404, detail="ECG page not deployed")
+    if not ECG_ENABLED or not os.path.exists(_ECG_PAGE):
+        raise HTTPException(status_code=404, detail="Not found")
     # FileResponse sends ETag/Last-Modified but no Cache-Control, which lets the
     # browser apply heuristic freshness and serve a stale copy for hours without
     # ever revalidating - so a deployed fix to this page never reaches the user.
@@ -3047,10 +3051,21 @@ async def _read_image_upload(upload: UploadFile, which: str = "") -> bytes:
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, detail=f"{label} is larger than 20 MB. Choose a smaller photograph.")
     try:
-        with Image.open(BytesIO(data)) as im:
-            im.verify()
+        Image.open(BytesIO(data)).close()
     except (UnidentifiedImageError, OSError, SyntaxError, ValueError, Image.DecompressionBombError):
         raise HTTPException(400, detail=f"{label} is not an image Alati can read. Upload a JPG or PNG fundus photograph.")
+    # It is an image; now check the whole file decodes. A half-downloaded photo
+    # opens fine and then fails during analysis, so decode it fully here and
+    # give the user the real reason.
+    try:
+        with Image.open(BytesIO(data)) as im:
+            im.verify()
+        with Image.open(BytesIO(data)) as im:
+            im.load()
+    except Image.DecompressionBombError:
+        raise HTTPException(413, detail=f"{label} has too many pixels to analyse. Upload the photo as exported by the fundus camera.")
+    except Exception:
+        raise HTTPException(400, detail=f"{label} is damaged or incomplete. Download or export it again, then upload it.")
     return data
 
 

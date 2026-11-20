@@ -632,7 +632,9 @@ def _v10_scores(img: Image.Image) -> List[float]:
 
 def _v10_predict(image_bytes: bytes) -> dict:
     """Same return shape as _v8_predict, plus gradability."""
-    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    raw_img = Image.open(BytesIO(image_bytes))
+    jpeg_q = _quality.jpeg_quality(raw_img) if QUALITY_GATE else None
+    img = raw_img.convert("RGB")
     if QUALITY_GATE:
         ok, reason, qf = check_quality(img)
         if not ok:
@@ -645,11 +647,14 @@ def _v10_predict(image_bytes: bytes) -> dict:
     referred = p_ref >= V10_THRESH[1]
     is_dr = (p_any >= V10_THRESH[0]) or referred
 
-    # Low-resolution photo: a referral is still reported, but "no DR" and "not
-    # referable" are not, because shrunk copies hide lesions (quality.py).
+    # Low-resolution or heavily compressed photo: a referral is still reported,
+    # but "no DR" and "not referable" are not, because both hide lesions (quality.py).
     retina_px = max(disc.size)
-    if QUALITY_GATE and not referred and retina_px < _quality.MIN_RETINA_PX_TO_RULE_OUT:
-        return _v10_ungradable(_quality.LOW_RES_REASON, {**qf, "retina_px": float(retina_px)})
+    if QUALITY_GATE and not referred:
+        if retina_px < _quality.MIN_RETINA_PX_TO_RULE_OUT:
+            return _v10_ungradable(_quality.LOW_RES_REASON, {**qf, "retina_px": float(retina_px)})
+        if jpeg_q is not None and jpeg_q < _quality.MIN_JPEG_QUALITY_TO_RULE_OUT:
+            return _v10_ungradable(_quality.COMPRESSED_REASON, {**qf, "jpeg_quality": float(jpeg_q)})
     grade = int(min(4, max(0, round(sum(p)))))
     if referred:
         grade = max(grade, 2)
@@ -762,7 +767,7 @@ def model_info() -> dict:
             "quality_gate": ({"on": True, **{k: getattr(_quality, k) for k in
                               ("MIN_SIDE", "MIN_RETINA_FRAC", "MIN_LUM", "MAX_LUM",
                                "GRAY_ABS_RED_BLUE", "MIN_SHARP", "MAX_SHARP",
-                               "MIN_RETINA_PX_TO_RULE_OUT")},
+                               "MIN_RETINA_PX_TO_RULE_OUT", "MIN_JPEG_QUALITY_TO_RULE_OUT")},
                               "measured": V10_CAL.get("quality_gate_measured")}
                              if QUALITY_GATE else {"on": False}),
             "measured": V10_CAL.get("measured"),

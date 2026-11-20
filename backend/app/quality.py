@@ -48,6 +48,29 @@ MIN_RETINA_PX_TO_RULE_OUT = 1000
 LOW_RES_REASON = ("The image resolution is too low to rule out referable diabetic retinopathy. "
                   "Upload the original photo from the fundus camera, not a screenshot or a downloaded copy.")
 
+# Compression rule (20 Nov 2026), same shape as the resolution rule. Heavy JPEG
+# compression wipes out the same small lesions: 9 referable APTOS originals saved
+# as JPEG read correctly at quality 50 and above, but 2 of 9 read "no DR" at
+# quality 40, 3 at 30 and 6 at 20 (healthy eyes stayed normal). Fundus cameras
+# save at about 94-95 and typical web copies at 65-87, so below 60 a "no DR"
+# answer is withheld. Quality is estimated from the file's own quantization table.
+MIN_JPEG_QUALITY_TO_RULE_OUT = 60
+COMPRESSED_REASON = ("The photo is too heavily compressed to rule out referable diabetic retinopathy. "
+                     "Upload the original photo from the fundus camera, not a copy sent through a messaging app.")
+
+_STD_LUMA = (16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69, 56,
+             14, 17, 22, 29, 51, 87, 80, 62, 18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92,
+             49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99)
+
+
+def jpeg_quality(img: Image.Image) -> Optional[float]:
+    """libjpeg-scale quality (1-100) estimated from a JPEG's luminance table; None if not a JPEG."""
+    tables = getattr(img, "quantization", None)
+    if not tables or 0 not in tables or len(tables[0]) != 64:
+        return None
+    scale = sum(tables[0]) / sum(_STD_LUMA) * 100
+    return float(round((200 - scale) / 2 if scale <= 100 else 5000 / scale))
+
 
 def _crop_to_disc(img: Image.Image) -> Image.Image:
     a = np.asarray(img.convert("RGB"))
