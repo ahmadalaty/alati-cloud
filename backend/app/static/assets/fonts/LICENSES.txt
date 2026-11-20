@@ -1,0 +1,7 @@
+Fonts served by Alati from this folder are licensed under the SIL Open Font
+License, Version 1.1 (https://openfontlicense.org/open-font-license-official-text/).
+
+public-sans-latin.woff2      Public Sans - Copyright 2015 The Public Sans Project Authors (https://github.com/uswds/public-sans)
+ibm-plex-mono-*-latin.woff2  IBM Plex Mono - Copyright 2017 IBM Corp. (https://github.com/IBM/plex)
+
+Latin subsets as distributed by Google Fonts; files unmodified.

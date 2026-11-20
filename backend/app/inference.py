@@ -358,7 +358,9 @@ class DRNetV6(nn.Module):
 def _load_ordinal(path):
     if not os.path.exists(path):
         raise RuntimeError(f"weights not found for {MODEL_VERSION}: {path}")
-    ck = torch.load(path, map_location=DEVICE)
+    # weights_only: the checkpoint is plain tensors, strings and numbers, so
+    # nothing in it is allowed to run code while loading.
+    ck = torch.load(path, map_location=DEVICE, weights_only=True)
     m = DRNetV6(ck.get("backbone", "resnet50")).to(DEVICE)
     m.load_state_dict(ck["state"], strict=True)
     m.eval()
@@ -632,7 +634,9 @@ def _v10_scores(img: Image.Image) -> List[float]:
 
 def _v10_predict(image_bytes: bytes) -> dict:
     """Same return shape as _v8_predict, plus gradability."""
-    raw_img = Image.open(BytesIO(image_bytes))
+    # Same short list of formats the upload check accepts (main.UPLOAD_FORMATS):
+    # Pillow's rarer decoders are never reached with user data.
+    raw_img = Image.open(BytesIO(image_bytes), formats=("JPEG", "PNG", "WEBP", "TIFF"))
     jpeg_q = _quality.jpeg_quality(raw_img) if QUALITY_GATE else None
     img = raw_img.convert("RGB")
     if QUALITY_GATE:

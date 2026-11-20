@@ -5,7 +5,8 @@ import hashlib
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Request
-from jose import jwt, JWTError
+import jwt
+from jwt import PyJWTError as JWTError
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
@@ -33,6 +34,14 @@ def verify_password(password: str, password_hash: str) -> bool:
         return pwd_context.verify(password or "", password_hash or "")
     except Exception:
         return False
+
+
+def decode_jwt(token: str):
+    """Claims of a valid, unexpired login token signed by this service; None otherwise."""
+    try:
+        return jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
+    except (JWTError, ValueError, TypeError):
+        return None
 
 
 def create_token(data: dict) -> str:
@@ -104,38 +113,22 @@ def require_user(req: Request, db: Session) -> int:
 
 def require_admin(req: Request) -> int:
     """
-    Validate that request is from admin (OWNER_EMAIL).
-    Works with JWT tokens from login OR email:password format.
-    
-    Format 1 (JWT from UI login): Authorization: Bearer <jwt_token>
-    Format 2 (Basic auth): Authorization: Bearer email:password
+    The caller must hold a login token for the owner account (OWNER_EMAIL).
+
+    The old "Bearer email:password" form was removed on 20 Nov 2026: it put the
+    admin password in every request header and allowed unlimited guessing
+    against it. Sign in through /auth/login and use the returned token.
     """
     token = _extract_token(req)
     if not token:
         raise HTTPException(status_code=401, detail="Missing admin credentials")
-
     admin_email = (settings.OWNER_EMAIL or "").strip().lower()
-    admin_password = (settings.OWNER_PASSWORD or "").strip()
-    
-    if not admin_email or not admin_password:
+    if not admin_email:
         raise HTTPException(status_code=500, detail="Admin not configured")
-    
-    # Try JWT first (from UI login)
-    try:
-        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
-        user_email = payload.get("email", "").strip().lower()
-        
-        # Check if JWT email matches admin email
-        if user_email == admin_email:
+    payload = decode_jwt(token)
+    if payload and (payload.get("email") or "").strip().lower() == admin_email:
+        try:
             return int(payload.get("sub", 0))
-    except (JWTError, ValueError):
-        pass
-    
-    # Try email:password format (backward compatibility)
-    if ":" in token:
-        email, password = token.split(":", 1)
-        if email.lower() == admin_email and password == admin_password:
-            return 0  # Return dummy user_id for admin
-    
-    # Neither worked
+        except (TypeError, ValueError):
+            pass
     raise HTTPException(status_code=401, detail="Invalid admin credentials")
