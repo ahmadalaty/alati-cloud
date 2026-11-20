@@ -353,13 +353,13 @@ LOGIN_HTML = """<!DOCTYPE html>
       <div class="stats" aria-label="Measured performance">
         <div class="stat">
           <div class="stat-label">Referable diabetic retinopathy</div>
-          <div class="stat-nums"><span><b>99.4%</b> sensitivity</span><span><b>81.7%</b> specificity</span></div>
+          <div class="stat-nums"><span><b>99.4%</b> sensitivity</span><span><b>79.2%</b> specificity</span></div>
         </div>
         <div class="stat">
           <div class="stat-label">Any diabetic retinopathy</div>
-          <div class="stat-nums"><span><b>99.8%</b> sensitivity</span><span><b>90.4%</b> specificity</span></div>
+          <div class="stat-nums"><span><b>99.8%</b> sensitivity</span><span><b>89.0%</b> specificity</span></div>
         </div>
-        <p class="stat-note">Retrospective evaluation on 3,662 retinal photographs from an independent public dataset not used in development (95% CI: referable 98.9–99.7% / 80.0–83.3%; any DR 99.5–99.9% / 89.0–91.7%). Standard fundus cameras; smartphone cameras not validated. A screening aid, not a replacement for an eye examination.</p>
+        <p class="stat-note">Retrospective evaluation on 3,662 retinal photographs from an independent public dataset not used in development; 3,406 were gradable, as low-resolution photos are declined rather than called normal (95% CI: referable 98.9–99.7% / 77.3–81.0%; any DR 99.5–99.9% / 87.4–90.5%). Standard fundus cameras; smartphone cameras not validated. A screening aid, not a replacement for an eye examination.</p>
       </div>
     </div>
 
@@ -857,7 +857,7 @@ SCAN_HTML = """<!DOCTYPE html>
         </div>
         <input type="file" id="file-a" accept="image/*" hidden>
         <input type="file" id="file-b" accept="image/*" hidden>
-        <p class="guidance">Use a colour fundus photograph from a standard fundus camera, ideally the original file. Smartphone fundus cameras and ultra-widefield images are not yet validated. Photos are analysed in memory and are not stored.</p>
+        <p class="guidance">Upload the original colour fundus photograph from a standard fundus camera. Screenshots and downloaded copies are often too small: when the retina is under about 1,000 pixels across, Alati can still flag referable disease but will not rule it out. Smartphone fundus cameras and ultra-widefield images are not yet validated. Photos are analysed in memory and are not stored.</p>
       </div>
 
       <div class="buttons">

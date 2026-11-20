@@ -147,10 +147,11 @@ def create_pdf_report(scan_id: int, eyes: List[Tuple[str, str]], eye_mode: str,
     y -= 16
     y = _wrap(c, "Alati gives a referral decision for diabetic retinopathy from a colour fundus photograph. "
                  "On 3,662 photographs from an independent public dataset that was not used to develop it "
-                 "(APTOS 2019, Aravind Eye Hospital, India), it detected referable diabetic retinopathy with "
-                 "99.4% sensitivity (95% CI 98.9-99.7%) and 81.7% specificity (95% CI 80.0-83.3%). "
-                 "That evaluation was retrospective and used standard fundus cameras. Smartphone fundus "
-                 "cameras, ultra-widefield images and severity grading are not validated.",
+                 "(APTOS 2019, Aravind Eye Hospital, India; 3,406 gradable), it detected referable diabetic "
+                 "retinopathy with 99.4% sensitivity (95% CI 98.9-99.7%) and 79.2% specificity "
+                 "(95% CI 77.3-81.0%). That evaluation was retrospective and used standard fundus cameras. "
+                 "Low-resolution photos are declined rather than called normal. Smartphone fundus cameras, "
+                 "ultra-widefield images and severity grading are not validated.",
               L, y, width, size=9.5, leading=13.5, color=INK)
     y -= 10
     c.setFont("Helvetica-Bold", 11)

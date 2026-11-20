@@ -637,12 +637,19 @@ def _v10_predict(image_bytes: bytes) -> dict:
         ok, reason, qf = check_quality(img)
         if not ok:
             return _v10_ungradable(reason, qf)
-    p = _v10_scores(_square_pad(_crop_to_disc(img)))
+    disc = _crop_to_disc(img)
+    p = _v10_scores(_square_pad(disc))
     p_any, p_ref = float(p[0]), float(p[1])
 
     # Deployed rule, and the rule that was measured: referral forces the DR call.
     referred = p_ref >= V10_THRESH[1]
     is_dr = (p_any >= V10_THRESH[0]) or referred
+
+    # Low-resolution photo: a referral is still reported, but "no DR" and "not
+    # referable" are not, because shrunk copies hide lesions (quality.py).
+    retina_px = max(disc.size)
+    if QUALITY_GATE and not referred and retina_px < _quality.MIN_RETINA_PX_TO_RULE_OUT:
+        return _v10_ungradable(_quality.LOW_RES_REASON, {**qf, "retina_px": float(retina_px)})
     grade = int(min(4, max(0, round(sum(p)))))
     if referred:
         grade = max(grade, 2)
@@ -754,7 +761,8 @@ def model_info() -> dict:
             "calibrated_on": V10_CAL.get("calibrated_on"),
             "quality_gate": ({"on": True, **{k: getattr(_quality, k) for k in
                               ("MIN_SIDE", "MIN_RETINA_FRAC", "MIN_LUM", "MAX_LUM",
-                               "GRAY_ABS_RED_BLUE", "MIN_SHARP", "MAX_SHARP")},
+                               "GRAY_ABS_RED_BLUE", "MIN_SHARP", "MAX_SHARP",
+                               "MIN_RETINA_PX_TO_RULE_OUT")},
                               "measured": V10_CAL.get("quality_gate_measured")}
                              if QUALITY_GATE else {"on": False}),
             "measured": V10_CAL.get("measured"),

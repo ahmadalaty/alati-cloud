@@ -34,6 +34,20 @@ GRAY_ABS_RED_BLUE = 0.01  # |R - B| / luminance below this = grayscale: OCT, mas
 MIN_SHARP = 0.79          # Laplacian std, green channel, 512px frame, well inside the rim
 MAX_SHARP = 21.25         # above this the "detail" is noise, not anatomy
 
+# Resolution rule (20 Nov 2026). Below this retina size (longer side of the disc's
+# bounding box, in pixels) the service never answers "no DR": only a referable
+# finding is reported, anything else is "not gradable". Shrunk copies of
+# high-resolution photos lose the small lesions the model reads: of 40 referable
+# APTOS eyes shrunk to 640 px wide, 6 came back "no DR" (0 of 40 at 800 px and up),
+# and 2 of 3 grade-4 eyes shrunk to 512 px did. APTOS's native low-resolution
+# photos were read correctly (44 of 44 referable), but a downloaded copy and a
+# native small photo cannot be told apart, so the safe answer is withheld.
+# On APTOS this turns 254 small healthy photos into "not gradable" and leaves
+# sensitivity unchanged (D:lati-train\gate_res_impact.py).
+MIN_RETINA_PX_TO_RULE_OUT = 1000
+LOW_RES_REASON = ("The image resolution is too low to rule out referable diabetic retinopathy. "
+                  "Upload the original photo from the fundus camera, not a screenshot or a downloaded copy.")
+
 
 def _crop_to_disc(img: Image.Image) -> Image.Image:
     a = np.asarray(img.convert("RGB"))
